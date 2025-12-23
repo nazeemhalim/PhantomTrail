@@ -439,11 +439,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             val lat = doubleArrayOf(startLat, 0.0)
             val lon = doubleArrayOf(startLon, 0.0)
 
-            val waypoints = StringBuilder()
+            val trackpoints = StringBuilder()
             var currentTime = stepTimestamps.lastOrNull() ?: ZonedDateTime.now()
             var distance = 0.0
             var i = 1
-            var waypointIndex = 0
+            var pointIndex = 0
 
             // Generate points until we cover the total distance
             while (distance < totalDistance && i < 10000) {
@@ -460,25 +460,35 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 // Move backwards in time for the trail
                 currentTime = currentTime.minusSeconds(speed.toLong())
 
-                val timeStr = currentTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'"))
-                val elevation = generateElevation(waypointIndex, BASE_ELEVATION)
+                val timeStr = currentTime.format(DateTimeFormatter.ISO_INSTANT)
+                val elevation = generateElevation(pointIndex, BASE_ELEVATION)
 
-                waypoints.insert(0, """
-<wpt lat="${lat[i % 2]}" lon="${lon[i % 2]}">
-    <ele>${"%.2f".format(elevation)}</ele>
+                trackpoints.insert(0, """   <trkpt lat="${"%.7f".format(lat[i % 2])}" lon="${"%.7f".format(lon[i % 2])}">
+    <ele>${"%.1f".format(elevation)}</ele>
     <time>$timeStr</time>
-</wpt>
+   </trkpt>
 """)
 
-                waypointIndex++
+                pointIndex++
 
                 // Add random angle variation
                 angle += (Math.random() * angleVariability) - (angleVariability / 2.0)
             }
 
-            val gpxContent = """<?xml version="1.0"?>
-<gpx version="1.1" creator="gpxgenerator.com">
-$waypoints</gpx>"""
+            val startTime = currentTime.format(DateTimeFormatter.ISO_INSTANT)
+
+            val gpxContent = """<?xml version="1.0" encoding="UTF-8"?>
+<gpx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd http://www.garmin.com/xmlschemas/GpxExtensions/v3 http://www.garmin.com/xmlschemas/GpxExtensionsv3.xsd http://www.garmin.com/xmlschemas/TrackPointExtension/v1 http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd" creator="StravaGPX" version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" xmlns:gpxx="http://www.garmin.com/xmlschemas/GpxExtensions/v3">
+ <metadata>
+  <time>$startTime</time>
+ </metadata>
+ <trk>
+  <name>Step Trail</name>
+  <type>running</type>
+  <trkseg>
+$trackpoints </trkseg>
+ </trk>
+</gpx>"""
 
             // Write to file
             val dir = externalCacheDir ?: cacheDir
@@ -520,11 +530,11 @@ $waypoints</gpx>"""
         val lat = doubleArrayOf(startLat, 0.0)
         val lon = doubleArrayOf(startLon, 0.0)
 
-        val waypoints = StringBuilder()
+        val trackpoints = StringBuilder()
         var currentTime = endTime
         var distance = 0.0
         var i = 1
-        var waypointIndex = 0
+        var pointIndex = 0
 
         while (distance < totalDistance && i < 10000) {
             lat[i % 2] = lat[(i + 1) % 2] + cos(angle) * SCALE
@@ -538,23 +548,33 @@ $waypoints</gpx>"""
             i++
             currentTime = currentTime.minusSeconds(speed.toLong())
 
-            val timeStr = currentTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'"))
-            val elevation = generateElevation(waypointIndex, BASE_ELEVATION)
+            val timeStr = currentTime.format(DateTimeFormatter.ISO_INSTANT)
+            val elevation = generateElevation(pointIndex, BASE_ELEVATION)
 
-            waypoints.insert(0, """
-<wpt lat="${lat[i % 2]}" lon="${lon[i % 2]}">
-    <ele>${"%.2f".format(elevation)}</ele>
+            trackpoints.insert(0, """   <trkpt lat="${"%.7f".format(lat[i % 2])}" lon="${"%.7f".format(lon[i % 2])}">
+    <ele>${"%.1f".format(elevation)}</ele>
     <time>$timeStr</time>
-</wpt>
+   </trkpt>
 """)
 
-            waypointIndex++
+            pointIndex++
             angle += (Math.random() * angleVariability) - (angleVariability / 2.0)
         }
 
-        val gpxContent = """<?xml version="1.0"?>
-<gpx version="1.1" creator="gpxgenerator.com">
-$waypoints</gpx>"""
+        val startTime = currentTime.format(DateTimeFormatter.ISO_INSTANT)
+
+        val gpxContent = """<?xml version="1.0" encoding="UTF-8"?>
+<gpx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd http://www.garmin.com/xmlschemas/GpxExtensions/v3 http://www.garmin.com/xmlschemas/GpxExtensionsv3.xsd http://www.garmin.com/xmlschemas/TrackPointExtension/v1 http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd" creator="StravaGPX" version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" xmlns:gpxx="http://www.garmin.com/xmlschemas/GpxExtensions/v3">
+ <metadata>
+  <time>$startTime</time>
+ </metadata>
+ <trk>
+  <name>Random Phantom Trail</name>
+  <type>running</type>
+  <trkseg>
+$trackpoints </trkseg>
+ </trk>
+</gpx>"""
 
         val dir = externalCacheDir ?: cacheDir
         val file = File(dir, "random_trail_${System.currentTimeMillis()}.gpx")
