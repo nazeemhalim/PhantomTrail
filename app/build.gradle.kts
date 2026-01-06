@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -85,6 +85,14 @@ dependencies {
 
     // Multidex
     implementation("androidx.multidex:multidex:2.0.1")
+
+    // Google Maps API
+    implementation("com.google.maps.android:maps-compose:4.3.0")
+    implementation("com.google.android.gms:play-services-maps:18.2.0")
+
+    // Google Firebase SDK
+    implementation(platform("com.google.firebase:firebase-bom:34.7.0"))
+    implementation("com.google.firebase:firebase-analytics")
 
     // Testing
     testImplementation("junit:junit:4.13.2")
