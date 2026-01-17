@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "944964449256",
+    "project_id": "phantomtrail",
+    "storage_bucket": "phantomtrail.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:944964449256:android:4efd61db17d8d7bb2c2a5d",
+        "android_client_info": {
+          "package_name": "com.example.phantomtrail"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC20xt0okq9FCW3JHT9R7PeU1mqFoDTb5c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
