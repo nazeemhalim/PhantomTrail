@@ -1,5 +1,6 @@
 package com.example.phantomtrail
 
+import android.Manifest
 import android.app.AlertDialog
 import android.app.Notification
 import android.app.NotificationChannel
@@ -8,6 +9,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -16,7 +18,10 @@ import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.PowerManager
+import android.text.InputType
 import android.util.Log
+import android.widget.EditText
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -32,6 +37,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -44,21 +50,22 @@ import androidx.core.content.FileProvider
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.phantomtrail.ui.theme.PhantomTrailTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.time.Duration
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlin.math.*
-
 private val Context.dataStore by preferencesDataStore(name = "step_counter")
 
 // Foreground Service for Step Counting
@@ -74,6 +81,7 @@ class StepCounterService : Service(), SensorEventListener {
     private val stepTimestamps = mutableListOf<ZonedDateTime>()
 
     private var notificationManager: NotificationManager? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     companion object {
         const val CHANNEL_ID = "StepCounterChannel"
@@ -89,14 +97,16 @@ class StepCounterService : Service(), SensorEventListener {
 
         val isRunning = MutableStateFlow(false)
         val currentStepCount = MutableStateFlow(0)
+
+
     }
 
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service onCreate")
 
-        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
+        notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
 
         createNotificationChannel()
 
@@ -106,7 +116,13 @@ class StepCounterService : Service(), SensorEventListener {
                 val prefs = dataStore.data.first()
                 currentSteps = prefs[STEPS_KEY] ?: 0
                 currentStepCount.value = currentSteps
-                initialStepCount = prefs[INITIAL_SENSOR_COUNT_KEY] ?: -1
+
+                // IMPORTANT: Always reset initialStepCount on service creation
+                // This handles cases where phone rebooted while tracking
+                // The sensor counter has reset, so we need to recalculate the baseline
+                initialStepCount = -1
+
+                Log.d(TAG, "Service onCreate - Steps: $currentSteps, Reset initialStepCount to -1")
 
                 // Load timestamps
                 prefs[TIMESTAMPS_KEY]?.let { timestampsStr ->
@@ -123,7 +139,7 @@ class StepCounterService : Service(), SensorEventListener {
                 }
 
                 isInitialized = true
-                Log.d(TAG, "Data loaded: $currentSteps steps")
+                Log.d(TAG, "Service initialized with $currentSteps steps")
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading data: ${e.message}")
                 isInitialized = true
@@ -144,7 +160,17 @@ class StepCounterService : Service(), SensorEventListener {
 
     private fun startTracking() {
         try {
-            Log.d(TAG, "Starting tracking")
+            Log.d(TAG, "Starting tracking - Current steps: $currentSteps, Initial sensor count: $initialStepCount")
+
+            // Acquire partial wake lock to ensure sensor updates
+            val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "PhantomTrail::StepCounterWakeLock"
+            ).apply {
+                acquire(10*60*60*1000L /*10 hours*/)
+            }
+            Log.d(TAG, "Wake lock acquired")
 
             // Start foreground service with notification
             val notification = createNotification()
@@ -162,8 +188,15 @@ class StepCounterService : Service(), SensorEventListener {
                 ?: sensorManager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
 
             stepSensor?.let {
-                val registered = sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
-                Log.d(TAG, "Sensor registered: $registered, Type: ${it.type}")
+                // Use SENSOR_DELAY_NORMAL for step counter (best balance)
+                // SENSOR_DELAY_FASTEST can drain battery and step counter batches anyway
+                val delay = if (it.type == Sensor.TYPE_STEP_COUNTER) {
+                    SensorManager.SENSOR_DELAY_NORMAL
+                } else {
+                    SensorManager.SENSOR_DELAY_FASTEST
+                }
+                val registered = sensorManager.registerListener(this, it, delay)
+                Log.d(TAG, "Sensor registered: $registered, Type: ${it.type}, Delay: $delay")
             } ?: run {
                 Log.e(TAG, "No step sensor available!")
             }
@@ -179,6 +212,15 @@ class StepCounterService : Service(), SensorEventListener {
 
             sensorManager.unregisterListener(this)
             saveSteps()
+
+            // Release wake lock
+            wakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    Log.d(TAG, "Wake lock released")
+                }
+            }
+            wakeLock = null
 
             isRunning.value = false
 
@@ -202,9 +244,21 @@ class StepCounterService : Service(), SensorEventListener {
             when (event.sensor.type) {
                 Sensor.TYPE_STEP_COUNTER -> {
                     val totalSteps = event.values[0].toInt()
+                    Log.d(TAG, "Sensor total steps: $totalSteps, Initial: $initialStepCount, Current saved: $currentSteps")
+
+                    // Check if sensor has reset (happens after reboot)
+                    // If sensor value is less than our saved initial count, sensor must have reset
+                    if (initialStepCount != -1 && totalSteps < initialStepCount) {
+                        Log.d(TAG, "Sensor reset detected! Resetting initialStepCount. SensorValue: $totalSteps < InitialCount: $initialStepCount")
+                        initialStepCount = -1
+                    }
 
                     if (initialStepCount == -1) {
+                        // First time starting OR after sensor reset
+                        // Set initial count so that sensor value - initial = current saved steps
                         initialStepCount = totalSteps - currentSteps
+                        Log.d(TAG, "Set initial sensor count: $initialStepCount (totalSteps: $totalSteps - currentSteps: $currentSteps)")
+
                         scope.launch {
                             dataStore.edit { prefs ->
                                 prefs[INITIAL_SENSOR_COUNT_KEY] = initialStepCount
@@ -213,11 +267,14 @@ class StepCounterService : Service(), SensorEventListener {
                     }
 
                     val newStepCount = totalSteps - initialStepCount
+                    Log.d(TAG, "Calculated new step count: $newStepCount (totalSteps: $totalSteps - initialStepCount: $initialStepCount)")
 
+                    // Add timestamps for new steps
                     while (currentSteps < newStepCount) {
                         stepTimestamps.add(ZonedDateTime.now())
                         currentSteps++
                         currentStepCount.value = currentSteps
+                        Log.d(TAG, "Step incremented to: $currentSteps")
                     }
 
                     saveSteps()
@@ -227,6 +284,7 @@ class StepCounterService : Service(), SensorEventListener {
                     stepTimestamps.add(ZonedDateTime.now())
                     currentSteps++
                     currentStepCount.value = currentSteps
+                    Log.d(TAG, "Step detector - incremented to: $currentSteps")
                     saveSteps()
                     updateNotification()
                 }
@@ -294,6 +352,7 @@ class StepCounterService : Service(), SensorEventListener {
                     prefs[INITIAL_SENSOR_COUNT_KEY] = initialStepCount
                     prefs[TIMESTAMPS_KEY] = stepTimestamps.joinToString(",")
                 }
+                Log.d(TAG, "Saved steps: $currentSteps, initial sensor: $initialStepCount")
             } catch (e: Exception) {
                 Log.e(TAG, "Error saving steps: ${e.message}")
             }
@@ -303,6 +362,15 @@ class StepCounterService : Service(), SensorEventListener {
     override fun onDestroy() {
         super.onDestroy()
         sensorManager.unregisterListener(this)
+
+        // Release wake lock if held
+        wakeLock?.let {
+            if (it.isHeld) {
+                it.release()
+                Log.d(TAG, "Wake lock released in onDestroy")
+            }
+        }
+
         saveSteps()
     }
 
@@ -313,6 +381,7 @@ class StepCounterService : Service(), SensorEventListener {
 class MainActivity : ComponentActivity() {
 
     private val stepsFlow = MutableStateFlow(0)
+
     private val isTrackingFlow = MutableStateFlow(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -325,9 +394,12 @@ class MainActivity : ComponentActivity() {
         private val TIMESTAMPS_KEY = stringPreferencesKey("step_timestamps")
         private val SESSION_START_KEY = stringPreferencesKey("session_start")
 
+        private val STEP_LENGTH_KEY = doublePreferencesKey("step_length_meters")
         private const val START_LAT = 2.9279088973999023
         private const val START_LON = 101.64179229736328
-        private const val STEP_LENGTH_METERS = 0.75
+
+        private val stepLengthMeters = MutableStateFlow<Double> (0.75)
+
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -335,17 +407,17 @@ class MainActivity : ComponentActivity() {
 
         // Request permissions
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
-                != android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
             ) {
-                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 2)
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
             }
         }
 
-        if (checkSelfPermission(android.Manifest.permission.ACTIVITY_RECOGNITION)
-            != android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION)
+            != PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissions(arrayOf(android.Manifest.permission.ACTIVITY_RECOGNITION), 1)
+            requestPermissions(arrayOf(Manifest.permission.ACTIVITY_RECOGNITION), 1)
         }
 
         // Load saved steps into the service flow immediately
@@ -353,6 +425,8 @@ class MainActivity : ComponentActivity() {
             try {
                 val prefs = dataStore.data.first()
                 val savedSteps = prefs[STEPS_KEY] ?: 0
+
+                stepLengthMeters.value = prefs[STEP_LENGTH_KEY] ?: 0.75
                 StepCounterService.currentStepCount.value = savedSteps
                 Log.d(TAG, "Loaded saved steps on startup: $savedSteps")
             } catch (e: Exception) {
@@ -366,6 +440,7 @@ class MainActivity : ComponentActivity() {
             // Observe service state flows
             val serviceSteps by StepCounterService.currentStepCount.collectAsState()
             val serviceTracking by StepCounterService.isRunning.collectAsState()
+            val stepLength by stepLengthMeters.collectAsState()
 
             PhantomTrailTheme {
                 Column(
@@ -386,10 +461,15 @@ class MainActivity : ComponentActivity() {
                         fontSize = 50.sp
                     )
 
+                    Text(
+                        text = String.format("%.2f km", serviceSteps * stepLength / 1000.0),
+                        color = Color.Gray,
+                        fontSize = 16.sp
+                    )
                     Spacer(modifier = Modifier.height(16.dp))
 
                     Text(
-                        text = if (serviceTracking) "Recording..." else "Stopped",
+                        text = if (serviceTracking) "recording..." else "stopped",
                         color = if (serviceTracking) Color(0xFF4A7C59) else Color.Gray,
                         fontSize = 24.sp
                     )
@@ -410,7 +490,7 @@ class MainActivity : ComponentActivity() {
                         )
                     ) {
                         Text(
-                            text = if (serviceTracking) "Pause" else "Start",
+                            text = if (serviceTracking) "pause" else "start",
                             color = Color.White,
                             fontSize = 18.sp
                         )
@@ -420,28 +500,43 @@ class MainActivity : ComponentActivity() {
 
                     // Stop Button (resets steps)
                     Button(
-                        onClick = { stopAndResetSteps() },
+                        onClick = {confirmStop()},
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color(0xFFD32F2F)
                         )
                     ) {
                         Text(
-                            text = "Stop & Reset",
+                            text = "stop",
                             color = Color.White,
                             fontSize = 18.sp
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(32.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
+                    // Set Step Length Button
+                    Button(
+                        onClick = {setStepLength()},
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF606060)
+                        )
+                    ) {
+                        Text(
+                            text = "step length",
+                            color = Color.White,
+                            fontSize = 18.sp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
 
                     Button(
                         onClick = { exportStepBasedGPX() },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF4A7C59)
+                            containerColor = Color(0xFF606060)
                         )
                     ) {
                         Text(
-                            text = "Export GPX",
+                            text = "export",
                             color = Color.White,
                             fontSize = 18.sp
                         )
@@ -474,6 +569,7 @@ class MainActivity : ComponentActivity() {
             try {
                 val prefs = dataStore.data.first()
                 val savedSteps = prefs[STEPS_KEY] ?: 0
+                val stepLengthMeters = prefs[STEP_LENGTH_KEY] ?: 0.75
 
                 stepsFlow.value = savedSteps
 
@@ -516,15 +612,59 @@ class MainActivity : ComponentActivity() {
         startService(serviceIntent)
 
         scope.launch {
-            kotlinx.coroutines.delay(500)
+            delay(500)
             loadData()
         }
 
         Toast.makeText(this, "Paused tracking", Toast.LENGTH_SHORT).show()
     }
 
+    private fun confirmStop(){
+        AlertDialog.Builder(this@MainActivity)
+            .setMessage("Do you want to stop and reset steps?")
+            .setTitle("Stop & Reset")
+            .setPositiveButton("Yes") { dialog, which ->
+                stopAndResetSteps()
+            }
+            .setNegativeButton("No") { dialog, which ->
+            }
+            .create()
+            .show()
+    }
+
+     private fun setStepLength(){
+        val input = EditText(this)
+        input.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+
+        AlertDialog.Builder(this@MainActivity)
+            .setTitle("Step Length")
+            .setView(input)
+            .setPositiveButton("OK") { _, _ ->
+                val value = input.text.toString()
+
+                if (value.isNotEmpty()) {
+                    val number = value.toDouble()
+                    stepLengthMeters.value = number
+
+                    scope.launch {
+                        dataStore.edit { prefs ->
+                            prefs[STEP_LENGTH_KEY] = number
+                        }
+                    }
+
+                    Toast.makeText(this, "Value: $number", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Input cannot be empty", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("CANCEL") { dialog, which ->
+            }
+            .create()
+            .show()
+    }
     private fun stopAndResetSteps() {
         // Stop service if running
+
         if (StepCounterService.isRunning.value) {
             val serviceIntent = Intent(this, StepCounterService::class.java).apply {
                 action = StepCounterService.ACTION_STOP
@@ -549,20 +689,40 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun exportStepBasedGPX() {
-        val stepCount = StepCounterService.currentStepCount.value
-        val timestampCount = stepTimestamps.size
-
-        if (stepCount == 0 || timestampCount < 2) {
-            AlertDialog.Builder(this)
-                .setMessage("Start counting and export again")
-                .setTitle("Not Enough Steps")
-                .create()
-                .show()
-            return
-        }
-
         scope.launch {
             try {
+                // Reload timestamps from DataStore
+                val prefs = dataStore.data.first()
+                val stepCount = prefs[STEPS_KEY] ?: 0
+
+                stepTimestamps.clear()
+                prefs[TIMESTAMPS_KEY]?.let { timestampsStr ->
+                    timestampsStr.split(",").forEach { ts ->
+                        if (ts.isNotBlank()) {
+                            try {
+                                stepTimestamps.add(ZonedDateTime.parse(ts))
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error parsing timestamp: ${e.message}")
+                            }
+                        }
+                    }
+                }
+
+                Log.d(TAG, "Loaded ${stepTimestamps.size} timestamps for GPX export")
+
+                val timestampCount = stepTimestamps.size
+
+                if (stepCount == 0 || timestampCount < 2) {
+                    withContext(Dispatchers.Main) {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setMessage("Start counting and export again")
+                            .setTitle("Not Enough Steps")
+                            .create()
+                            .show()
+                    }
+                    return@launch
+                }
+
                 val gpxFile = generateStepBasedGPX()
                 withContext(Dispatchers.Main) {
                     shareGPXFile(gpxFile, "Step Trail")
@@ -601,7 +761,7 @@ class MainActivity : ComponentActivity() {
         var angle = 0.0
         val angleVariability = Math.PI / 7
         val totalSteps = StepCounterService.currentStepCount.value
-        val totalDistance = totalSteps * STEP_LENGTH_METERS / 1000.0
+        val totalDistance = totalSteps * stepLengthMeters.value / 1000.0
         val startLat = START_LAT
         val startLon = START_LON
 
@@ -616,7 +776,7 @@ class MainActivity : ComponentActivity() {
         for (i in 1 until stepTimestamps.size) {
             val prevTime = stepTimestamps[i - 1]
             val currTime = stepTimestamps[i]
-            val gap = java.time.Duration.between(prevTime, currTime).seconds
+            val gap = Duration.between(prevTime, currTime).seconds
             if (gap < 300) {
                 totalActiveSeconds += gap
             }
@@ -656,7 +816,7 @@ class MainActivity : ComponentActivity() {
  </metadata>
  <trk>
   <n>Phantom Trail</n>
-  <type>9</type>
+  <type>1</type>
   <trkseg>
 $trackpoints </trkseg>
  </trk>

@@ -14,7 +14,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "1.1"
+        versionName = "1.1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -79,6 +79,7 @@ dependencies {
 
     // GPX library - using older version that's more Android-compatible
     implementation("io.jenetics:jpx:2.2.0")
+    implementation(libs.androidx.compose.foundation.layout)
 
     // Core library desugaring
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
