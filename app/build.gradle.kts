@@ -14,7 +14,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "1.1.2"
+        versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -80,6 +80,7 @@ dependencies {
     // GPX library - using older version that's more Android-compatible
     implementation("io.jenetics:jpx:2.2.0")
     implementation(libs.androidx.compose.foundation.layout)
+    implementation(libs.androidx.foundation.layout)
 
     // Core library desugaring
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
@@ -87,9 +88,8 @@ dependencies {
     // Multidex
     implementation("androidx.multidex:multidex:2.0.1")
 
-    // Google Maps API
-    implementation("com.google.maps.android:maps-compose:4.3.0")
-    implementation("com.google.android.gms:play-services-maps:18.2.0")
+    // Open Street Maps API
+    implementation("org.osmdroid:osmdroid-android:6.1.18")
 
     // Google Firebase SDK
     implementation(platform("com.google.firebase:firebase-bom:34.7.0"))
