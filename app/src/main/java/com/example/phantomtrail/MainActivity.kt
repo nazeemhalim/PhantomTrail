@@ -27,17 +27,17 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -45,8 +45,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -61,10 +63,25 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
 import java.io.File
 import java.time.Duration
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import org.osmdroid.views.overlay.Polyline
+import org.osmdroid.views.overlay.Marker
+import android.graphics.Color as AndroidColor
+
 import kotlin.math.*
 private val Context.dataStore by preferencesDataStore(name = "step_counter")
 
@@ -91,6 +108,8 @@ class StepCounterService : Service(), SensorEventListener {
         private val STEPS_KEY = intPreferencesKey("saved_steps")
         private val INITIAL_SENSOR_COUNT_KEY = intPreferencesKey("initial_sensor_count")
         private val TIMESTAMPS_KEY = stringPreferencesKey("step_timestamps")
+
+
 
         const val ACTION_START = "ACTION_START"
         const val ACTION_STOP = "ACTION_STOP"
@@ -393,17 +412,40 @@ class MainActivity : ComponentActivity() {
         private val INITIAL_SENSOR_COUNT_KEY = intPreferencesKey("initial_sensor_count")
         private val TIMESTAMPS_KEY = stringPreferencesKey("step_timestamps")
         private val SESSION_START_KEY = stringPreferencesKey("session_start")
-
         private val STEP_LENGTH_KEY = doublePreferencesKey("step_length_meters")
+
+        private val TRAIL_POINTS_KEY = stringPreferencesKey("trail_points")
+        private val SHOW_MAP_KEY = booleanPreferencesKey("map_state")
+
+        private val CUSTOM_START_LAT_KEY = doublePreferencesKey("custom_start_lat")
+
+        private val CUSTOM_START_LON_KEY = doublePreferencesKey("custom_start_lon")
+
         private const val START_LAT = 2.9279088973999023
         private const val START_LON = 101.64179229736328
-
         private val stepLengthMeters = MutableStateFlow<Double> (0.75)
 
+        private val showMapFlow = MutableStateFlow (true)
+        private var lastProcessedSteps = 0
+        private var currentAngle = 0.0
+
+        private var accumulatedDistance = 0.0
+
+        val trailPoints = MutableStateFlow<List<GeoPoint>>(emptyList())
+
+        val customStartLat = MutableStateFlow(START_LAT)
+        val customStartLon = MutableStateFlow(START_LON)
+
+        val isSelectingStartLocation = MutableStateFlow(false)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Configuration.getInstance().apply {
+            userAgentValue = packageName
+            load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
+        }
+
 
         // Request permissions
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -427,123 +469,411 @@ class MainActivity : ComponentActivity() {
                 val savedSteps = prefs[STEPS_KEY] ?: 0
 
                 stepLengthMeters.value = prefs[STEP_LENGTH_KEY] ?: 0.75
+                showMapFlow.value = prefs[SHOW_MAP_KEY] ?: false
                 StepCounterService.currentStepCount.value = savedSteps
+
                 Log.d(TAG, "Loaded saved steps on startup: $savedSteps")
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading steps on startup: ${e.message}")
             }
         }
 
+        scope.launch(Dispatchers.Main) {
+            StepCounterService.currentStepCount.collect { steps ->
+                Log.d(TAG, "Step count changed to: $steps, showMap: ${showMapFlow.value}")
+                if (steps > 0) {
+                    updateTrailPoints()
+                }
+            }
+        }
+
+
         loadData()
+
+        scope.launch {
+            try {
+                val prefs = dataStore.data.first()
+                val savedSteps = prefs[STEPS_KEY] ?: 0
+
+                stepLengthMeters.value = prefs[STEP_LENGTH_KEY] ?: 0.75
+                showMapFlow.value = prefs[SHOW_MAP_KEY] ?: false
+                StepCounterService.currentStepCount.value = savedSteps
+
+                customStartLat.value = prefs[CUSTOM_START_LAT_KEY] ?: START_LAT
+                customStartLon.value = prefs[CUSTOM_START_LON_KEY] ?: START_LON
+
+                // Load trail points
+                val savedTrailStr = prefs[TRAIL_POINTS_KEY]
+                if (savedTrailStr != null && savedTrailStr.isNotEmpty()) {
+                    val points = mutableListOf<GeoPoint>()
+                    savedTrailStr.split(";").forEach { pointStr ->
+                        val parts = pointStr.split(",")
+                        if (parts.size == 2) {
+                            points.add(GeoPoint(parts[0].toDouble(), parts[1].toDouble()))
+                        }
+                    }
+                    trailPoints.value = points
+                    lastProcessedSteps = savedSteps
+                    Log.d(TAG, "Loaded ${points.size} trail points")
+                }
+
+                Log.d(TAG, "Loaded saved steps on startup: $savedSteps")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error loading steps on startup: ${e.message}")
+            }
+        }
 
         setContent {
             // Observe service state flows
             val serviceSteps by StepCounterService.currentStepCount.collectAsState()
             val serviceTracking by StepCounterService.isRunning.collectAsState()
             val stepLength by stepLengthMeters.collectAsState()
+            val showMap by showMapFlow.collectAsState()
 
             PhantomTrailTheme {
-                Column(
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black)
-                ) {
-                    Text(
-                        text = "steps",
-                        color = Color(0xFF7B9E87),
-                        fontSize = 30.sp
-                    )
-                    Text(
-                        text = "$serviceSteps",
-                        color = Color.White,
-                        fontSize = 50.sp
-                    )
+                if (showMap) {
+                    // Show Map View
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        OSMMapView()
+                        val isSelecting by isSelectingStartLocation.collectAsState()
 
-                    Text(
-                        text = String.format("%.2f km", serviceSteps * stepLength / 1000.0),
-                        color = Color.Gray,
-                        fontSize = 16.sp
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
+                        // Close button overlay
+                        Button(
+                            onClick = {
+                                showMapFlow.value = false
+                                isSelectingStartLocation.value = false // Reset selection mode
+                            },
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(16.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF606060)
+                            )
+                        ) {
+                            Text("close", color = Color.White)
+                        }
 
-                    Text(
-                        text = if (serviceTracking) "recording..." else "stopped",
-                        color = if (serviceTracking) Color(0xFF4A7C59) else Color.Gray,
-                        fontSize = 24.sp
-                    )
-
-                    Spacer(modifier = Modifier.height(32.dp))
-
-                    // Start/Pause Button
-                    Button(
-                        onClick = {
-                            if (serviceTracking) {
-                                pauseTracking()
-                            } else {
-                                startTracking()
+                        // Set Start Location button (only show when not selecting)
+                        if (!isSelecting) {
+                            Button(
+                                onClick = { isSelectingStartLocation.value = true },
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(16.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF4A7C59)
+                                )
+                            ) {
+                                Text("set start", color = Color.White)
                             }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (serviceTracking) Color(0xFFFFA500) else Color(0xFF4A7C59)
-                        )
-                    ) {
-                        Text(
-                            text = if (serviceTracking) "pause" else "start",
-                            color = Color.White,
-                            fontSize = 18.sp
-                        )
+                        } else {
+                            // Show instruction when selecting
+                            Text(
+                                text = "Tap on map to set start location",
+                                color = Color.White,
+                                modifier = Modifier
+                                    .align(Alignment.TopCenter)
+                                    .padding(16.dp)
+                                    .background(Color.Black.copy(alpha = 0.7f))
+                                    .padding(8.dp)
+                            )
+                        }
+                        Button(
+                            onClick = {},
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(128.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF606060)
+                            )
+                        ){
+                            Text(
+                                text = "$serviceSteps",
+                                color = Color.White
+                            )
+                        }
+
+                        // Start/Pause — bottom center
+                        Button(
+                            onClick = { if (serviceTracking) pauseTracking() else startButton() },
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 64.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (serviceTracking) Color(0xFFFFA500) else Color(
+                                    0xFF4A7C59
+                                )
+                            )
+
+                        ) {
+                            Text(
+                                text = if (serviceTracking) "pause" else "start",
+                                color = Color.White
+                            )
+                        }
                     }
 
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Stop Button (resets steps)
-                    Button(
-                        onClick = {confirmStop()},
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFD32F2F)
-                        )
+                } else {
+                    Column(
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black)
                     ) {
                         Text(
-                            text = "stop",
-                            color = Color.White,
-                            fontSize = 18.sp
+                            text = "steps",
+                            color = Color(0xFF7B9E87),
+                            fontSize = 30.sp
                         )
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-                    // Set Step Length Button
-                    Button(
-                        onClick = {setStepLength()},
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF606060)
-                        )
-                    ) {
                         Text(
-                            text = "step length",
+                            text = "$serviceSteps",
                             color = Color.White,
-                            fontSize = 18.sp
+                            fontSize = 50.sp
                         )
-                    }
 
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Button(
-                        onClick = { exportStepBasedGPX() },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF606060)
-                        )
-                    ) {
                         Text(
-                            text = "export",
-                            color = Color.White,
-                            fontSize = 18.sp
+                            text = String.format("%.2f km", serviceSteps * stepLength / 1000.0),
+                            color = Color.Gray,
+                            fontSize = 16.sp
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Text(
+                            text = if (serviceTracking) "recording..." else "stopped",
+                            color = if (serviceTracking) Color(0xFF4A7C59) else Color.Gray,
+                            fontSize = 24.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(32.dp))
+
+                        // Start/Pause Button
+                        Button(
+                            onClick = {
+                                if (serviceTracking) {
+                                    pauseTracking()
+                                } else {
+                                    startButton()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (serviceTracking) Color(0xFFFFA500) else Color(
+                                    0xFF4A7C59
+                                )
+                            )
+                        ) {
+                            Text(
+                                text = if (serviceTracking) "pause" else "start",
+                                color = Color.White,
+                                fontSize = 18.sp
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Set Step Length Button
+                        Button(
+                            onClick = { setStepLength() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF606060)
+                            )
+                        ) {
+                            Text(
+                                text = "step length",
+                                color = Color.White,
+                                fontSize = 18.sp
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Button(
+                            onClick = { exportStepBasedGPX() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF606060)
+                            )
+                        ) {
+                            Text(
+                                text = "export",
+                                color = Color.White,
+                                fontSize = 18.sp
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Button(
+                            onClick = {
+                                showMapFlow.value = true
+                                updateTrailPoints() // Initialize trail points
+                                scope.launch {
+                                    dataStore.edit { prefs ->
+                                        prefs[SHOW_MAP_KEY] = true
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF606060)
+                            )
+                        ) {
+                            Text(
+                                text = "map",
+                                color = Color.White,
+                                fontSize = 18.sp
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(64.dp))
+
+                        Text(
+                            text = "V1.2.0",
+                            color = Color.DarkGray,
+                            fontSize = 12.sp,
                         )
                     }
                 }
             }
         }
+    }
+
+    // MAP
+    @Composable
+    fun OSMMapView() {
+        val context = LocalContext.current
+        val points by trailPoints.collectAsState()
+        val serviceSteps by StepCounterService.currentStepCount.collectAsState()
+        val isSelecting by isSelectingStartLocation.collectAsState()
+        val startLat by customStartLat.collectAsState()
+        val startLon by customStartLon.collectAsState()
+
+        val mapView = remember {
+            MapView(context).apply {
+                setTileSource(TileSourceFactory.MAPNIK)
+                setMultiTouchControls(true)
+                controller.setZoom(18.0)
+                controller.setCenter(GeoPoint(startLat, startLon))
+            }
+        }
+
+        // Handle map tap for location selection
+        DisposableEffect(isSelecting) {
+            if (isSelecting) {
+                val overlay = object : org.osmdroid.views.overlay.Overlay() {
+                    override fun onSingleTapConfirmed(e: android.view.MotionEvent?, mapView: MapView?): Boolean {
+                        if (isSelectingStartLocation.value && mapView != null && e != null) {
+                            val projection = mapView.projection
+                            val geoPoint = projection.fromPixels(e.x.toInt(), e.y.toInt()) as GeoPoint
+
+                            // Save the selected location
+                            customStartLat.value = geoPoint.latitude
+                            customStartLon.value = geoPoint.longitude
+
+                            scope.launch {
+                                dataStore.edit { prefs ->
+                                    prefs[CUSTOM_START_LAT_KEY] = geoPoint.latitude
+                                    prefs[CUSTOM_START_LON_KEY] = geoPoint.longitude
+                                }
+
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(
+                                        context,
+                                        "Updating trail...",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                    isSelectingStartLocation.value = false
+
+                                    // Regenerate the trail with the new start location
+                                    regenerateTrailWithNewStart()
+                                }
+                            }
+
+                            return true
+                        }
+                        return false
+                    }
+                }
+
+                mapView.overlays.add(0, overlay)
+
+                onDispose {
+                    mapView.overlays.remove(overlay)
+                }
+            } else {
+                onDispose { }
+            }
+        }
+
+        // Update map overlays
+        LaunchedEffect(points.size, points.lastOrNull(), isSelecting, startLat, startLon) {
+            Log.d("OSMMapView", "LaunchedEffect triggered - points size: ${points.size}, isSelecting: $isSelecting")
+
+            // Clear existing overlays
+            val tapOverlay = if (isSelecting) mapView.overlays.firstOrNull() else null
+            mapView.overlays.clear()
+            if (tapOverlay != null) {
+                mapView.overlays.add(tapOverlay)
+            }
+
+            if (isSelecting) {
+                // Show selection marker
+                val selectionMarker = Marker(mapView).apply {
+                    position = GeoPoint(startLat, startLon)
+                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                    title = "Start Location"
+                    snippet = "Tap anywhere to change"
+                    icon = context.getDrawable(android.R.drawable.ic_menu_mylocation)
+                    icon?.setTint(AndroidColor.rgb(255, 0, 0)) // Red
+                }
+                mapView.overlays.add(selectionMarker)
+                mapView.controller.setCenter(GeoPoint(startLat, startLon))
+            } else if (points.isNotEmpty()) {
+                // Normal trail display
+                if (points.size > 1) {
+                    val polyline = Polyline().apply {
+                        setPoints(points)
+                        outlinePaint.color = AndroidColor.rgb(123, 158, 135)
+                        outlinePaint.strokeWidth = 8f
+                        outlinePaint.isAntiAlias = true
+                    }
+                    mapView.overlays.add(polyline)
+                }
+
+                val startMarker = Marker(mapView).apply {
+                    position = points.first()
+                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                    title = "Start"
+                    snippet = "Trail beginning"
+                    icon = context.getDrawable(android.R.drawable.ic_menu_mylocation)
+                    icon?.setTint(AndroidColor.rgb(74, 124, 89))
+                }
+                mapView.overlays.add(startMarker)
+
+                if (points.size > 1) {
+                    val currentMarker = Marker(mapView).apply {
+                        position = points.last()
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                        title = "Current Position"
+                        snippet = "$serviceSteps steps"
+                        icon = context.getDrawable(android.R.drawable.ic_menu_mylocation)
+                        icon?.setTint(AndroidColor.rgb(255, 165, 0))
+                    }
+                    mapView.overlays.add(currentMarker)
+                    mapView.controller.animateTo(points.last())
+                }
+            }
+
+            mapView.invalidate()
+        }
+
+        DisposableEffect(Unit) {
+            mapView.onResume()
+            onDispose { mapView.onPause() }
+        }
+
+        AndroidView(
+            factory = { mapView },
+            modifier = Modifier.fillMaxSize()
+        )
     }
 
     override fun onResume() {
@@ -556,11 +886,15 @@ class MainActivity : ComponentActivity() {
                 val savedSteps = prefs[STEPS_KEY] ?: 0
                 StepCounterService.currentStepCount.value = savedSteps
                 Log.d(TAG, "Reloaded saved steps on resume: $savedSteps")
+
+                // Update trail points if map is showing
+                if (showMapFlow.value) {
+                    updateTrailPoints()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error reloading steps on resume: ${e.message}")
             }
         }
-
         loadData()
     }
 
@@ -592,17 +926,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startTracking() {
-        val serviceIntent = Intent(this, StepCounterService::class.java).apply {
-            action = StepCounterService.ACTION_START
-        }
+            val serviceIntent = Intent(this, StepCounterService::class.java).apply {
+                action = StepCounterService.ACTION_START
+            }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
-        }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
 
-        Toast.makeText(this, "Started tracking", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Started tracking", Toast.LENGTH_SHORT).show()
     }
 
     private fun pauseTracking() {
@@ -617,19 +951,6 @@ class MainActivity : ComponentActivity() {
         }
 
         Toast.makeText(this, "Paused tracking", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun confirmStop(){
-        AlertDialog.Builder(this@MainActivity)
-            .setMessage("Do you want to stop and reset steps?")
-            .setTitle("Stop & Reset")
-            .setPositiveButton("Yes") { dialog, which ->
-                stopAndResetSteps()
-            }
-            .setNegativeButton("No") { dialog, which ->
-            }
-            .create()
-            .show()
     }
 
      private fun setStepLength(){
@@ -657,6 +978,8 @@ class MainActivity : ComponentActivity() {
                     Toast.makeText(this, "Input cannot be empty", Toast.LENGTH_SHORT).show()
                 }
             }
+            .setMessage("Current step length is ${stepLengthMeters.value}m\n" +
+                    "\nPlease input step length in metres")
             .setNegativeButton("CANCEL") { dialog, which ->
             }
             .create()
@@ -664,7 +987,6 @@ class MainActivity : ComponentActivity() {
     }
     private fun stopAndResetSteps() {
         // Stop service if running
-
         if (StepCounterService.isRunning.value) {
             val serviceIntent = Intent(this, StepCounterService::class.java).apply {
                 action = StepCounterService.ACTION_STOP
@@ -675,6 +997,10 @@ class MainActivity : ComponentActivity() {
         // Reset all data
         StepCounterService.currentStepCount.value = 0
         stepTimestamps.clear()
+        trailPoints.value = listOf(GeoPoint(customStartLat.value, customStartLon.value))
+        lastProcessedSteps = 0
+        currentAngle = 0.0
+        accumulatedDistance = 0.0 // ADD THIS LINE
 
         scope.launch {
             dataStore.edit { prefs ->
@@ -682,10 +1008,48 @@ class MainActivity : ComponentActivity() {
                 prefs[INITIAL_SENSOR_COUNT_KEY] = -1
                 prefs[TIMESTAMPS_KEY] = ""
                 prefs[SESSION_START_KEY] = ZonedDateTime.now().toString()
+                prefs[TRAIL_POINTS_KEY] = "${customStartLat.value},${customStartLon.value}"
             }
         }
 
         Toast.makeText(this, "Stopped and reset steps", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun startButton() {
+        val items = arrayOf(
+            "Start New Trail",
+            "Continue Existing",
+        )
+        var checkedItems = -1
+
+        if (StepCounterService.currentStepCount.value <= 0) {
+            startTracking()
+        } else {
+            AlertDialog.Builder(this)
+                .setTitle("Tracking options")
+                .setSingleChoiceItems(items, checkedItems) { _, which,->
+                    checkedItems = which
+                }
+                .setPositiveButton("OK") { dialog, which ->
+                    // Apply actions when OK / Positive is pressed
+                    when(checkedItems){
+                        0 -> {
+                            stopAndResetSteps()
+                            startTracking()
+                        }
+
+                        1 -> {
+                            startTracking()
+                        }
+                    }
+
+                    dialog.dismiss()
+                }
+                .setNegativeButton("CANCEL") { dialog, which ->
+                    dialog.dismiss()
+                }
+                .show()
+        }
     }
 
     private fun exportStepBasedGPX() {
@@ -830,6 +1194,180 @@ $trackpoints </trkseg>
         val file = File(dir, "phantom_trail_${System.currentTimeMillis()}.gpx")
         file.writeText(gpxContent)
         return file
+    }
+
+    private fun updateTrailPoints() {
+        scope.launch {
+            try {
+                val SCALE = 0.0001
+                val angleVariability = Math.PI / 7
+                val totalSteps = StepCounterService.currentStepCount.value
+
+                Log.d(TAG, "updateTrailPoints called - totalSteps: $totalSteps, lastProcessedSteps: $lastProcessedSteps")
+
+                // Load existing trail points
+                val prefs = dataStore.data.first()
+                val savedTrailStr = prefs[TRAIL_POINTS_KEY]
+                val existingPoints = mutableListOf<GeoPoint>()
+
+                if (savedTrailStr != null && savedTrailStr.isNotEmpty()) {
+                    savedTrailStr.split(";").forEach { pointStr ->
+                        val parts = pointStr.split(",")
+                        if (parts.size == 2) {
+                            existingPoints.add(GeoPoint(parts[0].toDouble(), parts[1].toDouble()))
+                        }
+                    }
+                }
+
+                // If no existing points, create start point
+                if (existingPoints.isEmpty()) {
+                    existingPoints.add(GeoPoint(START_LAT, START_LON))
+                    lastProcessedSteps = 0
+                    currentAngle = 0.0
+                    accumulatedDistance = 0.0
+                }
+
+                if (totalSteps == 0) {
+                    withContext(Dispatchers.Main) {
+                        trailPoints.value = existingPoints
+                    }
+                    return@launch
+                }
+
+                // Calculate how many new steps to add
+                val newSteps = totalSteps - lastProcessedSteps
+                Log.d(TAG, "newSteps to process: $newSteps")
+
+                if (newSteps <= 0) {
+                    withContext(Dispatchers.Main) {
+                        trailPoints.value = existingPoints
+                    }
+                    return@launch
+                }
+
+                // Add new distance to accumulated distance
+                val newDistance = newSteps * stepLengthMeters.value / 1000.0
+                accumulatedDistance += newDistance
+
+                val startLat = customStartLat.value
+                val startLon = customStartLon.value
+
+                val distanceBetweenPoints = calculateHaversineDistance(
+                    startLon, startLat,
+                    startLon + SCALE, startLat
+                )
+
+                // Calculate points based on accumulated distance
+                val newPointsToAdd = (accumulatedDistance / distanceBetweenPoints).toInt()
+
+                Log.d(TAG, "newDistance: $newDistance km, accumulated: $accumulatedDistance km, newPointsToAdd: $newPointsToAdd")
+
+                if (newPointsToAdd > 0) {
+                    // Subtract the distance we're about to use
+                    accumulatedDistance -= (newPointsToAdd * distanceBetweenPoints)
+
+                    // Get the last point as starting position
+                    val lastPoint = existingPoints.last()
+                    var lat = lastPoint.latitude
+                    var lon = lastPoint.longitude
+
+                    // Add new points
+                    repeat(newPointsToAdd) {
+                        lat += cos(currentAngle) * SCALE
+                        lon += sin(currentAngle) * SCALE
+                        existingPoints.add(GeoPoint(lat, lon))
+                        currentAngle += (Math.random() * angleVariability) - (angleVariability / 2.0)
+                    }
+
+                    // Save updated trail points
+                    val trailStr = existingPoints.joinToString(";") { "${it.latitude},${it.longitude}" }
+                    dataStore.edit { prefs ->
+                        prefs[TRAIL_POINTS_KEY] = trailStr
+                    }
+
+                    // Update on Main thread to ensure UI updates
+                    withContext(Dispatchers.Main) {
+                        trailPoints.value = existingPoints.toList() // Create new list instance to trigger recomposition
+                        Log.d(TAG, "Trail points updated: ${existingPoints.size} points, last point: ${existingPoints.lastOrNull()}")
+                    }
+                }
+
+                lastProcessedSteps = totalSteps
+
+                Log.d(TAG, "Updated trail: ${existingPoints.size} points for $totalSteps steps (added $newPointsToAdd points), remaining accumulated: $accumulatedDistance km")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error updating trail points: ${e.message}", e)
+            }
+        }
+    }
+
+    private fun regenerateTrailWithNewStart() {
+        scope.launch {
+            try {
+                val totalSteps = StepCounterService.currentStepCount.value
+                if (totalSteps == 0) {
+                    // Just set the new start point
+                    trailPoints.value = listOf(GeoPoint(customStartLat.value, customStartLon.value))
+                    dataStore.edit { prefs ->
+                        prefs[TRAIL_POINTS_KEY] = "${customStartLat.value},${customStartLon.value}"
+                    }
+                    return@launch
+                }
+
+                // Regenerate the entire trail from scratch with new start location
+                val SCALE = 0.0001
+                val angleVariability = Math.PI / 7
+                val startLat = customStartLat.value
+                val startLon = customStartLon.value
+
+                val totalDistance = totalSteps * stepLengthMeters.value / 1000.0
+
+                val distanceBetweenPoints = calculateHaversineDistance(
+                    startLon, startLat,
+                    startLon + SCALE, startLat
+                )
+
+                val numberOfPoints = (totalDistance / distanceBetweenPoints).toInt().coerceAtLeast(0)
+
+                val newPoints = mutableListOf<GeoPoint>()
+                newPoints.add(GeoPoint(startLat, startLon))
+
+                var lat = startLat
+                var lon = startLon
+                var angle = 0.0
+
+                repeat(numberOfPoints) {
+                    lat += cos(angle) * SCALE
+                    lon += sin(angle) * SCALE
+                    newPoints.add(GeoPoint(lat, lon))
+                    angle += (Math.random() * angleVariability) - (angleVariability / 2.0)
+                }
+
+                // Save the new trail
+                val trailStr = newPoints.joinToString(";") { "${it.latitude},${it.longitude}" }
+                dataStore.edit { prefs ->
+                    prefs[TRAIL_POINTS_KEY] = trailStr
+                }
+
+                // Update state
+                withContext(Dispatchers.Main) {
+                    trailPoints.value = newPoints
+                    currentAngle = angle
+                    accumulatedDistance = totalDistance - (numberOfPoints * distanceBetweenPoints)
+                    lastProcessedSteps = totalSteps
+
+                    Log.d(TAG, "Regenerated trail with ${newPoints.size} points from new start location")
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Trail updated with new start location",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error regenerating trail: ${e.message}", e)
+            }
+        }
     }
 
     private fun shareGPXFile(file: File, trailType: String) {
