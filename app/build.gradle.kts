@@ -91,6 +91,9 @@ dependencies {
     // Open Street Maps API
     implementation("org.osmdroid:osmdroid-android:6.1.18")
 
+    // EXIF
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
+
     // Google Firebase SDK
     implementation(platform("com.google.firebase:firebase-bom:34.7.0"))
     implementation("com.google.firebase:firebase-analytics")

@@ -7,6 +7,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -15,10 +16,13 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.IBinder
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.text.InputType
 import android.util.Log
 import android.widget.EditText
@@ -32,7 +36,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -74,14 +77,17 @@ import java.time.format.DateTimeFormatter
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.foundation.layout.padding
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import org.osmdroid.views.overlay.Polyline
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.exifinterface.media.ExifInterface
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.*
 import org.osmdroid.views.overlay.Marker
+import java.time.ZoneId
 import android.graphics.Color as AndroidColor
-
 import kotlin.math.*
 private val Context.dataStore by preferencesDataStore(name = "step_counter")
 
@@ -406,6 +412,14 @@ class MainActivity : ComponentActivity() {
 
     private val stepTimestamps = mutableListOf<ZonedDateTime>()
 
+    private val pickMultipleMedia = registerForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(maxItems = 20)
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            processPhotosWithGPS(uris)
+        }
+    }
+
     companion object {
         private const val TAG = "MainActivity"
         private val STEPS_KEY = intPreferencesKey("saved_steps")
@@ -425,7 +439,7 @@ class MainActivity : ComponentActivity() {
         private const val START_LON = 101.64179229736328
         private val stepLengthMeters = MutableStateFlow<Double> (0.75)
 
-        private val showMapFlow = MutableStateFlow (true)
+        private val showMapFlow = MutableStateFlow (false)
         private var lastProcessedSteps = 0
         private var currentAngle = 0.0
 
@@ -469,7 +483,7 @@ class MainActivity : ComponentActivity() {
                 val savedSteps = prefs[STEPS_KEY] ?: 0
 
                 stepLengthMeters.value = prefs[STEP_LENGTH_KEY] ?: 0.75
-                showMapFlow.value = prefs[SHOW_MAP_KEY] ?: false
+                showMapFlow.value = false
                 StepCounterService.currentStepCount.value = savedSteps
 
                 Log.d(TAG, "Loaded saved steps on startup: $savedSteps")
@@ -496,12 +510,11 @@ class MainActivity : ComponentActivity() {
                 val savedSteps = prefs[STEPS_KEY] ?: 0
 
                 stepLengthMeters.value = prefs[STEP_LENGTH_KEY] ?: 0.75
-                showMapFlow.value = prefs[SHOW_MAP_KEY] ?: false
+                showMapFlow.value = false
                 StepCounterService.currentStepCount.value = savedSteps
 
                 customStartLat.value = prefs[CUSTOM_START_LAT_KEY] ?: START_LAT
                 customStartLon.value = prefs[CUSTOM_START_LON_KEY] ?: START_LON
-
                 // Load trail points
                 val savedTrailStr = prefs[TRAIL_POINTS_KEY]
                 if (savedTrailStr != null && savedTrailStr.isNotEmpty()) {
@@ -540,7 +553,7 @@ class MainActivity : ComponentActivity() {
                         // Close button overlay
                         Button(
                             onClick = {
-                                showMapFlow.value = false
+                                showMapFlow.value =  false
                                 isSelectingStartLocation.value = false // Reset selection mode
                             },
                             modifier = Modifier
@@ -703,15 +716,25 @@ class MainActivity : ComponentActivity() {
                         Spacer(modifier = Modifier.height(16.dp))
 
                         Button(
+                            onClick = { selectPhotosForGPS() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF606060)
+                            )
+                        ) {
+                            Text(
+                                text = "exif",
+                                color = Color.White,
+                                fontSize = 18.sp
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Button(
                             onClick = {
                                 showMapFlow.value = true
                                 updateTrailPoints() // Initialize trail points
-                                scope.launch {
-                                    dataStore.edit { prefs ->
-                                        prefs[SHOW_MAP_KEY] = true
-                                    }
-                                }
-                            },
+                                },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFF606060)
                             )
@@ -832,7 +855,7 @@ class MainActivity : ComponentActivity() {
                     val polyline = Polyline().apply {
                         setPoints(points)
                         outlinePaint.color = AndroidColor.rgb(123, 158, 135)
-                        outlinePaint.strokeWidth = 8f
+                        outlinePaint.strokeWidth = 12f
                         outlinePaint.isAntiAlias = true
                     }
                     mapView.overlays.add(polyline)
@@ -1121,65 +1144,86 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun generateStepBasedGPX(): File {
-        val SCALE = 0.0001
-        var angle = 0.0
-        val angleVariability = Math.PI / 7
         val totalSteps = StepCounterService.currentStepCount.value
-        val totalDistance = totalSteps * stepLengthMeters.value / 1000.0
-        val startLat = START_LAT
-        val startLon = START_LON
 
-        val distanceBetweenPoints = calculateHaversineDistance(
-            startLon, startLat,
-            startLon + SCALE, startLat
-        )
+        // Use the actual trail points that are displayed on the map
+        val points = trailPoints.value
 
-        val numberOfPoints = (totalDistance / distanceBetweenPoints).toInt()
+        if (points.isEmpty()) {
+            // Fallback: create a single point at start location
+            val startLat = customStartLat.value
+            val startLon = customStartLon.value
+            val trackpoints = """   <trkpt lat="${"%.7f".format(startLat)}" lon="${"%.7f".format(startLon)}">
+    <time>${stepTimestamps.firstOrNull()?.format(DateTimeFormatter.ISO_INSTANT) ?: ZonedDateTime.now().format(DateTimeFormatter.ISO_INSTANT)}</time>
+   </trkpt>
+"""
 
+            val startTime = stepTimestamps.firstOrNull()?.format(DateTimeFormatter.ISO_INSTANT)
+                ?: ZonedDateTime.now().format(DateTimeFormatter.ISO_INSTANT)
+
+            val gpxContent = """<?xml version="1.0" encoding="UTF-8"?>
+<gpx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd http://www.garmin.com/xmlschemas/GpxExtensions/v3 http://www.garmin.com/xmlschemas/GpxExtensionsv3.xsd http://www.garmin.com/xmlschemas/TrackPointExtension/v1 http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd" creator="StravaGPX" version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" xmlns:gpxx="http://www.garmin.com/xmlschemas/GpxExtensions/v3">
+ <metadata>
+  <time>$startTime</time>
+ </metadata>
+ <trk>
+  <name>Phantom Trail</name>
+  <type>1</type>
+  <trkseg>
+$trackpoints </trkseg>
+ </trk>
+</gpx>"""
+
+            val dir = externalCacheDir ?: cacheDir
+            if (!dir.exists()) {
+                dir.mkdirs()
+            }
+
+            val file = File(dir, "phantom_trail_${System.currentTimeMillis()}.gpx")
+            file.writeText(gpxContent)
+            return file
+        }
+
+        // Calculate time distribution based on actual timestamps
         var totalActiveSeconds = 0L
         for (i in 1 until stepTimestamps.size) {
             val prevTime = stepTimestamps[i - 1]
             val currTime = stepTimestamps[i]
             val gap = Duration.between(prevTime, currTime).seconds
-            if (gap < 300) {
+            if (gap < 300) {  // 5 minute threshold
                 totalActiveSeconds += gap
             }
         }
 
-        val secondsPerPoint = if (numberOfPoints > 1 && totalActiveSeconds > 0) {
-            totalActiveSeconds.toDouble() / numberOfPoints
+        val secondsPerPoint = if (points.size > 1 && totalActiveSeconds > 0) {
+            totalActiveSeconds.toDouble() / points.size
         } else {
             1.0
         }
 
-        val lat = doubleArrayOf(startLat, 0.0)
-        val lon = doubleArrayOf(startLon, 0.0)
+        // Generate trackpoints from the actual trail points
         val trackpoints = StringBuilder()
-        var currentTime = stepTimestamps.first()
-        var i = 1
+        var currentTime = stepTimestamps.firstOrNull() ?: ZonedDateTime.now()
 
-        repeat(numberOfPoints) {
-            lat[i % 2] = lat[(i + 1) % 2] + cos(angle) * SCALE
-            lon[i % 2] = lon[(i + 1) % 2] + sin(angle) * SCALE
-            i++
-
+        for (point in points) {
             val timeStr = currentTime.format(DateTimeFormatter.ISO_INSTANT)
-            trackpoints.append("""   <trkpt lat="${"%.7f".format(lat[i % 2])}" lon="${"%.7f".format(lon[i % 2])}">
+            trackpoints.append("""   <trkpt lat="${"%.7f".format(point.latitude)}" lon="${"%.7f".format(point.longitude)}">
     <time>$timeStr</time>
    </trkpt>
 """)
             currentTime = currentTime.plusSeconds(secondsPerPoint.toLong())
-            angle += (Math.random() * angleVariability) - (angleVariability / 2.0)
         }
 
-        val startTime = stepTimestamps.first().format(DateTimeFormatter.ISO_INSTANT)
+        val startTime = stepTimestamps.firstOrNull()?.format(DateTimeFormatter.ISO_INSTANT)
+            ?: ZonedDateTime.now().format(DateTimeFormatter.ISO_INSTANT)
+
         val gpxContent = """<?xml version="1.0" encoding="UTF-8"?>
 <gpx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd http://www.garmin.com/xmlschemas/GpxExtensions/v3 http://www.garmin.com/xmlschemas/GpxExtensionsv3.xsd http://www.garmin.com/xmlschemas/TrackPointExtension/v1 http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd" creator="StravaGPX" version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" xmlns:gpxx="http://www.garmin.com/xmlschemas/GpxExtensions/v3">
  <metadata>
   <time>$startTime</time>
  </metadata>
  <trk>
-  <n>Phantom Trail</n>
+  <name>Phantom Trail</name>
   <type>1</type>
   <trkseg>
 $trackpoints </trkseg>
@@ -1193,9 +1237,371 @@ $trackpoints </trkseg>
 
         val file = File(dir, "phantom_trail_${System.currentTimeMillis()}.gpx")
         file.writeText(gpxContent)
+
+        Log.d(TAG, "Generated GPX with ${points.size} points from trail")
         return file
     }
 
+    private fun processPhotosWithGPS(uris: List<android.net.Uri>) {
+        scope.launch {
+            try {
+                var successCount = 0
+                var errorCount = 0
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Processing ${uris.size} photos...",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+
+                // Load trail points and timestamps
+                val prefs = dataStore.data.first()
+                val savedTrailStr = prefs[TRAIL_POINTS_KEY]
+                val points = mutableListOf<GeoPoint>()
+
+                if (savedTrailStr != null && savedTrailStr.isNotEmpty()) {
+                    savedTrailStr.split(";").forEach { pointStr ->
+                        val parts = pointStr.split(",")
+                        if (parts.size == 2) {
+                            points.add(GeoPoint(parts[0].toDouble(), parts[1].toDouble()))
+                        }
+                    }
+                }
+
+                // Load step timestamps
+                stepTimestamps.clear()
+                prefs[TIMESTAMPS_KEY]?.let { timestampsStr ->
+                    timestampsStr.split(",").forEach { ts ->
+                        if (ts.isNotBlank()) {
+                            try {
+                                stepTimestamps.add(ZonedDateTime.parse(ts))
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error parsing timestamp: ${e.message}")
+                            }
+                        }
+                    }
+                }
+
+                if (points.isEmpty() || stepTimestamps.isEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "No trail data available. Start tracking first!",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@launch
+                }
+
+                val startTime = stepTimestamps.first()
+                val endTime = stepTimestamps.last()
+                val savedPhotoUris = mutableListOf<android.net.Uri>()
+
+                for (uri in uris) {
+                    try {
+                        // Copy URI to a temporary file we can modify
+                        val inputStream = contentResolver.openInputStream(uri)
+                        val tempFile = File(cacheDir, "temp_${System.currentTimeMillis()}.jpg")
+
+                        inputStream?.use { input ->
+                            FileOutputStream(tempFile).use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+
+                        // Read EXIF data
+                        val exif = ExifInterface(tempFile.absolutePath)
+
+                        // Get photo timestamp
+                        val photoTimeStr = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+                            ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
+
+                        val photoTime = if (photoTimeStr == null) {
+                            Log.w(TAG, "No timestamp in photo, using end of trail")
+                            endTime
+                        } else {
+                            parseExifDateTime(photoTimeStr)
+                        }
+
+                        // Find corresponding location on trail
+                        val location = findLocationForTime(photoTime, points, startTime, endTime)
+
+                        // Update GPS coordinates
+                        updatePhotoGPS(exif, location, tempFile)
+
+                        // Save to same directory as original
+                        val savedUri = savePhotoToSameDirectory(uri, tempFile)
+                        if (savedUri != null) {
+                            savedPhotoUris.add(savedUri)
+                            successCount++
+                            Log.d(TAG, "Updated photo GPS: ${location.latitude}, ${location.longitude}")
+                        } else {
+                            errorCount++
+                        }
+
+                        // Clean up temp file
+                        tempFile.delete()
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error processing photo: ${e.message}", e)
+                        errorCount++
+                    }
+                }
+
+                // Show results
+                withContext(Dispatchers.Main) {
+                    if (successCount > 0) {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Photos Updated")
+                            .setMessage(
+                                        "Location updated and saved as a new copy in gallery."
+                            )
+                            .setPositiveButton("Share") { _, _ ->
+                                sharePhotos(savedPhotoUris)
+                            }
+                            .setNeutralButton("OK", null)
+                            .show()
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Failed to process photos",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in processPhotosWithGPS: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Error processing photos: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+    private fun savePhotoToSameDirectory(originalUri: android.net.Uri, modifiedFile: File): android.net.Uri? {
+        return try {
+            // Get original photo metadata
+            val originalFileName = getFileName(originalUri) ?: "photo_${System.currentTimeMillis()}.jpg"
+            var relativePath = Environment.DIRECTORY_PICTURES
+
+            contentResolver.query(originalUri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val pathIndex = cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+                        if (pathIndex >= 0) {
+                            val path = cursor.getString(pathIndex)
+                            if (path != null) {
+                                relativePath = path
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Create new filename with GPS prefix
+            val baseName = originalFileName.substringBeforeLast(".")
+            val extension = originalFileName.substringAfterLast(".", "jpg")
+            val newFileName = "${baseName}_GPS.${extension}"
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Android 10+ - Use MediaStore with same relative path
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, newFileName)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, relativePath)
+                    put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+                    put(MediaStore.Images.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
+                }
+
+                val newUri = contentResolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    values
+                )
+
+                newUri?.let { uri ->
+                    contentResolver.openOutputStream(uri)?.use { output ->
+                        modifiedFile.inputStream().use { input ->
+                            input.copyTo(output)
+                        }
+                    }
+                    Log.d(TAG, "Saved GPS photo to same directory: $relativePath$newFileName")
+                    uri
+                }
+            } else {
+                // Android 9 and below - Get the actual file path
+                val filePath = getRealPathFromURI(originalUri)
+                if (filePath != null) {
+                    val originalFile = File(filePath)
+                    val parentDir = originalFile.parentFile
+
+                    if (parentDir != null && parentDir.exists()) {
+                        val newFile = File(parentDir, newFileName)
+                        modifiedFile.copyTo(newFile, overwrite = true)
+
+                        // Scan file to add to MediaStore
+                        MediaScannerConnection.scanFile(
+                            this@MainActivity,
+                            arrayOf(newFile.absolutePath),
+                            arrayOf("image/jpeg")
+                        ) { path, uri ->
+                            Log.d(TAG, "Scanned file: $path -> $uri")
+                        }
+
+                        Log.d(TAG, "Saved GPS photo to: ${newFile.absolutePath}")
+                        android.net.Uri.fromFile(newFile)
+                    } else {
+                        null
+                    }
+                } else {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save photo to same directory: ${e.message}")
+            null
+        }
+    }
+    private fun getRealPathFromURI(uri: android.net.Uri): String? {
+        var realPath: String? = null
+
+        if (uri.scheme == "content") {
+            contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DATA), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val columnIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+                    if (columnIndex >= 0) {
+                        realPath = cursor.getString(columnIndex)
+                    }
+                }
+            }
+        } else if (uri.scheme == "file") {
+            realPath = uri.path
+        }
+
+        return realPath
+    }
+    private fun parseExifDateTime(exifDateTime: String): ZonedDateTime {
+        // EXIF format: "2024:01:27 14:30:45"
+        val sdf = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US)
+        val date = sdf.parse(exifDateTime)
+        return ZonedDateTime.ofInstant(date?.toInstant() ?: java.time.Instant.now(), ZoneId.systemDefault())
+    }
+
+    private fun findLocationForTime(
+        photoTime: ZonedDateTime,
+        points: List<GeoPoint>,
+        startTime: ZonedDateTime,
+        endTime: ZonedDateTime
+    ): GeoPoint {
+        // If photo is before trail start, return start location
+        if (photoTime.isBefore(startTime)) {
+            Log.d(TAG, "Photo before trail start, using start location")
+            return points.first()
+        }
+
+        // If photo is after trail end, return end location
+        if (photoTime.isAfter(endTime)) {
+            Log.d(TAG, "Photo after trail end, using end location")
+            return points.last()
+        }
+
+        // Photo is during the trail - interpolate location
+        val totalDuration = Duration.between(startTime, endTime).toMillis().toDouble()
+        val photoOffset = Duration.between(startTime, photoTime).toMillis().toDouble()
+        val progress = photoOffset / totalDuration
+
+        // Find the point index based on progress
+        val pointIndex = (progress * (points.size - 1)).toInt().coerceIn(0, points.size - 1)
+
+        Log.d(TAG, "Photo during trail - progress: ${progress * 100}%, point index: $pointIndex")
+        return points[pointIndex]
+    }
+
+    private fun updatePhotoGPS(exif: ExifInterface, location: GeoPoint, file: File) {
+        // Convert decimal degrees to GPS format (degrees, minutes, seconds)
+        val lat = location.latitude
+        val lon = location.longitude
+
+        // Set latitude
+        val latRef = if (lat >= 0) "N" else "S"
+        exif.setAttribute(ExifInterface.TAG_GPS_LATITUDE, convertToExifFormat(abs(lat)))
+        exif.setAttribute(ExifInterface.TAG_GPS_LATITUDE_REF, latRef)
+
+        // Set longitude
+        val lonRef = if (lon >= 0) "E" else "W"
+        exif.setAttribute(ExifInterface.TAG_GPS_LONGITUDE, convertToExifFormat(abs(lon)))
+        exif.setAttribute(ExifInterface.TAG_GPS_LONGITUDE_REF, lonRef)
+
+        // Save changes
+        exif.saveAttributes()
+
+        Log.d(TAG, "Updated GPS: $lat,$lon ($latRef,$lonRef)")
+    }
+
+    private fun convertToExifFormat(decimalDegrees: Double): String {
+        val degrees = decimalDegrees.toInt()
+        val minutesDecimal = (decimalDegrees - degrees) * 60
+        val minutes = minutesDecimal.toInt()
+        val seconds = ((minutesDecimal - minutes) * 60 * 1000).toInt()
+
+        return "$degrees/1,$minutes/1,$seconds/1000"
+    }
+
+    private fun getFileName(uri: android.net.Uri): String? {
+        var fileName: String? = null
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (cursor.moveToFirst()) {
+                fileName = cursor.getString(nameIndex)
+            }
+        }
+        return fileName
+    }
+
+    private fun sharePhotos(uris: List<android.net.Uri>) {
+        try {
+            if (uris.isEmpty()) {
+                Toast.makeText(this, "No photos to share", Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "image/*"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
+            startActivity(Intent.createChooser(intent, "Share GPS-tagged photos"))
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sharing photos: ${e.message}")
+            Toast.makeText(this, "Error sharing photos: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+    // Add button click handler
+    private fun selectPhotosForGPS() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                requestPermissions(arrayOf(Manifest.permission.READ_MEDIA_IMAGES), 3)
+                return
+            }
+        } else {
+            if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                requestPermissions(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), 3)
+                return
+            }
+        }
+
+        pickMultipleMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+    }
     private fun updateTrailPoints() {
         scope.launch {
             try {
