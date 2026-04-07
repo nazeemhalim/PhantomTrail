@@ -749,7 +749,7 @@ class MainActivity : ComponentActivity() {
                         Spacer(modifier = Modifier.height(64.dp))
 
                         Text(
-                            text = "V1.2.0",
+                            text = "V1.4.3",
                             color = Color.DarkGray,
                             fontSize = 12.sp,
                         )
@@ -1143,34 +1143,64 @@ class MainActivity : ComponentActivity() {
         return R * c
     }
 
+    /**
+     * Interpolate a GPS location at a specific distance along the trail
+     */
+    private fun interpolateLocationAtDistance(
+        points: List<GeoPoint>,
+        distances: List<Double>,
+        targetDistance: Double
+    ): GeoPoint {
+        // Find which segment the target distance falls on
+        for (i in 1 until distances.size) {
+            if (targetDistance <= distances[i]) {
+                val segmentStart = distances[i - 1]
+                val segmentEnd = distances[i]
+                val segmentLength = segmentEnd - segmentStart
+
+                if (segmentLength < 0.000001) {
+                    return points[i - 1]
+                }
+
+                val segmentProgress = (targetDistance - segmentStart) / segmentLength
+
+                // Linear interpolation between points[i-1] and points[i]
+                val lat = points[i - 1].latitude + (points[i].latitude - points[i - 1].latitude) * segmentProgress
+                val lon = points[i - 1].longitude + (points[i].longitude - points[i - 1].longitude) * segmentProgress
+
+                return GeoPoint(lat, lon)
+            }
+        }
+
+        // If target distance is beyond the trail, return last point
+        return points.last()
+    }
+
     private fun generateStepBasedGPX(): File {
         val totalSteps = StepCounterService.currentStepCount.value
-
-        // Use the actual trail points that are displayed on the map
         val points = trailPoints.value
+        val timestamps = stepTimestamps
 
-        if (points.isEmpty()) {
+        if (points.isEmpty() || timestamps.isEmpty()) {
             // Fallback: create a single point at start location
             val startLat = customStartLat.value
             val startLon = customStartLon.value
-            val trackpoints = """   <trkpt lat="${"%.7f".format(startLat)}" lon="${"%.7f".format(startLon)}">
-    <time>${stepTimestamps.firstOrNull()?.format(DateTimeFormatter.ISO_INSTANT) ?: ZonedDateTime.now().format(DateTimeFormatter.ISO_INSTANT)}</time>
+            val trackpoint = """   <trkpt lat="${"%.7f".format(startLat)}" lon="${"%.7f".format(startLon)}">
+    <time>${ZonedDateTime.now().format(DateTimeFormatter.ISO_INSTANT)}</time>
    </trkpt>
 """
 
-            val startTime = stepTimestamps.firstOrNull()?.format(DateTimeFormatter.ISO_INSTANT)
-                ?: ZonedDateTime.now().format(DateTimeFormatter.ISO_INSTANT)
-
+            val startTime = ZonedDateTime.now().format(DateTimeFormatter.ISO_INSTANT)
             val gpxContent = """<?xml version="1.0" encoding="UTF-8"?>
-<gpx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd http://www.garmin.com/xmlschemas/GpxExtensions/v3 http://www.garmin.com/xmlschemas/GpxExtensionsv3.xsd http://www.garmin.com/xmlschemas/TrackPointExtension/v1 http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd" creator="StravaGPX" version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" xmlns:gpxx="http://www.garmin.com/xmlschemas/GpxExtensions/v3">
+<gpx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd http://www.garmin.com/xmlschemas/GpxExtensions/v3 http://www.garmin.com/xmlschemas/GpxExtensionsv3.xsd http://www.garmin.com/xmlschemas/TrackPointExtension/v1 http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd" creator="PhantomTrail" version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" xmlns:gpxx="http://www.garmin.com/xmlschemas/GpxExtensions/v3">
  <metadata>
   <time>$startTime</time>
  </metadata>
  <trk>
-  <name>Phantom Trail</name>
+  <n>Phantom Trail</n>
   <type>1</type>
   <trkseg>
-$trackpoints </trkseg>
+$trackpoint </trkseg>
  </trk>
 </gpx>"""
 
@@ -1178,52 +1208,56 @@ $trackpoints </trkseg>
             if (!dir.exists()) {
                 dir.mkdirs()
             }
-
             val file = File(dir, "phantom_trail_${System.currentTimeMillis()}.gpx")
             file.writeText(gpxContent)
             return file
         }
 
-        // Calculate time distribution based on actual timestamps
-        var totalActiveSeconds = 0L
-        for (i in 1 until stepTimestamps.size) {
-            val prevTime = stepTimestamps[i - 1]
-            val currTime = stepTimestamps[i]
-            val gap = Duration.between(prevTime, currTime).seconds
-            if (gap < 300) {  // 5 minute threshold
-                totalActiveSeconds += gap
-            }
+        // Calculate cumulative distances along the trail
+        val distances = mutableListOf(0.0)
+        for (i in 1 until points.size) {
+            val segmentDist = calculateHaversineDistance(
+                points[i-1].longitude,
+                points[i-1].latitude,
+                points[i].longitude,
+                points[i].latitude
+            )
+            distances.add(distances.last() + segmentDist)
         }
+        val totalDistance = distances.last()
 
-        val secondsPerPoint = if (points.size > 1 && totalActiveSeconds > 0) {
-            totalActiveSeconds.toDouble() / points.size
-        } else {
-            1.0
-        }
+        Log.d(TAG, "Generating GPX: ${timestamps.size} steps, ${points.size} trail points, ${totalDistance * 1000}m total distance")
 
-        // Generate trackpoints from the actual trail points
+        // Create one trackpoint per step timestamp
         val trackpoints = StringBuilder()
-        var currentTime = stepTimestamps.firstOrNull() ?: ZonedDateTime.now()
 
-        for (point in points) {
-            val timeStr = currentTime.format(DateTimeFormatter.ISO_INSTANT)
-            trackpoints.append("""   <trkpt lat="${"%.7f".format(point.latitude)}" lon="${"%.7f".format(point.longitude)}">
+        for (i in timestamps.indices) {
+            // Calculate progress through the walk (0.0 to 1.0)
+            val progress = if (timestamps.size > 1) {
+                i.toDouble() / (timestamps.size - 1)
+            } else {
+                0.0
+            }
+
+            // Find location at this progress along the trail
+            val targetDistance = progress * totalDistance
+            val location = interpolateLocationAtDistance(points, distances, targetDistance)
+
+            val timeStr = timestamps[i].format(DateTimeFormatter.ISO_INSTANT)
+            trackpoints.append("""   <trkpt lat="${"%.7f".format(location.latitude)}" lon="${"%.7f".format(location.longitude)}">
     <time>$timeStr</time>
    </trkpt>
 """)
-            currentTime = currentTime.plusSeconds(secondsPerPoint.toLong())
         }
 
-        val startTime = stepTimestamps.firstOrNull()?.format(DateTimeFormatter.ISO_INSTANT)
-            ?: ZonedDateTime.now().format(DateTimeFormatter.ISO_INSTANT)
-
+        val startTime = timestamps.first().format(DateTimeFormatter.ISO_INSTANT)
         val gpxContent = """<?xml version="1.0" encoding="UTF-8"?>
-<gpx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd http://www.garmin.com/xmlschemas/GpxExtensions/v3 http://www.garmin.com/xmlschemas/GpxExtensionsv3.xsd http://www.garmin.com/xmlschemas/TrackPointExtension/v1 http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd" creator="StravaGPX" version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" xmlns:gpxx="http://www.garmin.com/xmlschemas/GpxExtensions/v3">
+<gpx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd http://www.garmin.com/xmlschemas/GpxExtensions/v3 http://www.garmin.com/xmlschemas/GpxExtensionsv3.xsd http://www.garmin.com/xmlschemas/TrackPointExtension/v1 http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd" creator="PhantomTrail" version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" xmlns:gpxx="http://www.garmin.com/xmlschemas/GpxExtensions/v3">
  <metadata>
   <time>$startTime</time>
  </metadata>
  <trk>
-  <name>Phantom Trail</name>
+  <n>Phantom Trail</n>
   <type>1</type>
   <trkseg>
 $trackpoints </trkseg>
@@ -1234,11 +1268,10 @@ $trackpoints </trkseg>
         if (!dir.exists()) {
             dir.mkdirs()
         }
-
         val file = File(dir, "phantom_trail_${System.currentTimeMillis()}.gpx")
         file.writeText(gpxContent)
 
-        Log.d(TAG, "Generated GPX with ${points.size} points from trail")
+        Log.d(TAG, "Generated ${timestamps.size} trackpoints (1 per step)")
         return file
     }
 
