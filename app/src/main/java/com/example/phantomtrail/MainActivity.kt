@@ -47,6 +47,7 @@ import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
 import java.io.File
+import java.time.ZonedDateTime
 import kotlin.math.*
 import android.graphics.Color as AndroidColor
 
@@ -87,15 +88,22 @@ class MainActivity : ComponentActivity() {
         private val stepLengthMeters = MutableStateFlow(0.75)
         private val showMapFlow = MutableStateFlow(false)
 
-        // Trail generation state - ORIGINAL INLINE LOGIC
+        // Trail generation state
         private var lastProcessedSteps = 0
         private var currentAngle = 0.0
         private var accumulatedDistance = 0.0
+
+        // Slider
+        private val selectedTrackpointIndex = MutableStateFlow(0)
+
+        private val photosNeedingManualLocation = MutableStateFlow<List<Uri>>(emptyList())
 
         val trailPoints = MutableStateFlow<List<GeoPoint>>(emptyList())
         val customStartLat = MutableStateFlow(START_LAT)
         val customStartLon = MutableStateFlow(START_LON)
         val isSelectingStartLocation = MutableStateFlow(false)
+
+
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -442,12 +450,16 @@ class MainActivity : ComponentActivity() {
             }
 
             Spacer(modifier = Modifier.height(64.dp))
-            Text("V1.5", color = Color.DarkGray, fontSize = 12.sp)
+            Text("V1.5.1", color = Color.DarkGray, fontSize = 12.sp)
         }
     }
 
     @Composable
     fun MapScreen(serviceSteps: Int, serviceTracking: Boolean) {
+        val photosNeedingLocation by photosNeedingManualLocation.collectAsState()
+        val sliderPosition by selectedTrackpointIndex.collectAsState()
+        val points by trailPoints.collectAsState()
+
         Box(modifier = Modifier.fillMaxSize()) {
             OSMMapView()
             val isSelecting by isSelectingStartLocation.collectAsState()
@@ -500,6 +512,34 @@ class MainActivity : ComponentActivity() {
             ) {
                 Text(if (serviceTracking) "pause" else "start", color = Color.White)
             }
+
+            // Slider for manual photo location
+            if (photosNeedingLocation.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(16.dp)
+                        .background(Color.Black.copy(alpha = 0.8f))
+                        .padding(16.dp)
+                ) {
+                    Text("Select location for ${photosNeedingLocation.size} photos", color = Color.White)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    androidx.compose.material3.Slider(
+                        value = sliderPosition.toFloat(),
+                        onValueChange = { selectedTrackpointIndex.value = it.toInt() },
+                        valueRange = 0f..(points.size - 1).toFloat(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Text("Trackpoint ${sliderPosition + 1} of ${points.size}", color = Color.Gray, fontSize = 12.sp)
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(onClick = { applyManualLocationToPhotos() }) {
+                        Text("Apply Location")
+                    }
+                }
+            }
         }
     }
 
@@ -511,6 +551,8 @@ class MainActivity : ComponentActivity() {
         val isSelecting by isSelectingStartLocation.collectAsState()
         val startLat by customStartLat.collectAsState()
         val startLon by customStartLon.collectAsState()
+        val photosNeedingLocation by photosNeedingManualLocation.collectAsState()
+        val sliderPosition by selectedTrackpointIndex.collectAsState()
 
         val mapView = remember {
             MapView(context).apply {
@@ -553,7 +595,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        LaunchedEffect(points.size, points.lastOrNull(), isSelecting, startLat, startLon) {
+        LaunchedEffect(points.size, points.lastOrNull(), isSelecting, startLat, startLon, sliderPosition, photosNeedingLocation.isNotEmpty()) {
             val tapOverlay = if (isSelecting) mapView.overlays.firstOrNull() else null
             mapView.overlays.clear()
             if (tapOverlay != null) mapView.overlays.add(tapOverlay)
@@ -588,7 +630,19 @@ class MainActivity : ComponentActivity() {
                 }
                 mapView.overlays.add(startMarker)
 
-                if (points.size > 1) {
+                // Add selected trackpoint marker for photo location
+                if (photosNeedingLocation.isNotEmpty() && sliderPosition < points.size) {
+                    val selectedMarker = Marker(mapView).apply {
+                        position = points[sliderPosition]
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                        title = "Photo Location"
+                        snippet = "Trackpoint ${sliderPosition + 1}"
+                        icon = context.getDrawable(android.R.drawable.ic_menu_camera)
+                        icon?.setTint(AndroidColor.rgb(255, 0, 255)) // Purple
+                    }
+                    mapView.overlays.add(selectedMarker)
+                    mapView.controller.animateTo(points[sliderPosition])
+                } else if (points.size > 1) {
                     val currentMarker = Marker(mapView).apply {
                         position = points.last()
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
@@ -784,7 +838,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun streetView() {
-        Log.d(TAG, "Seeing Street View")
         val currentPoint = trailPoints.value.lastOrNull()
         if (currentPoint == null) {
             Toast.makeText(this, "No location available", Toast.LENGTH_SHORT).show()
@@ -794,17 +847,35 @@ class MainActivity : ComponentActivity() {
         val lat = currentPoint.latitude
         val lon = currentPoint.longitude
 
-        // Try Google Maps app first (better at finding closest Street View)
+        val uri = Uri.parse("geo:$lat,$lon?q=$lat,$lon")
+        val intent = Intent(Intent.ACTION_VIEW, uri)
+
         try {
-            val gmmIntentUri = Uri.parse("google.streetview:cbll=$lat,$lon")
-            val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri)
-            mapIntent.setPackage("com.google.android.apps.maps")
-            startActivity(mapIntent)
+            startActivity(Intent.createChooser(intent, "Open location in..."))
         } catch (e: Exception) {
-            // Fallback to browser - cbll parameter finds closest camera
-            val url = "https://www.google.com/maps?layer=c&cbll=$lat,$lon"
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-            startActivity(intent)
+            Toast.makeText(this, "No map apps available", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+
+
+    private fun getPhotoTimestamp(uri: Uri): ZonedDateTime? {
+        return try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                val tempFile = File(cacheDir, "temp_check.jpg")
+                tempFile.outputStream().use { output -> input.copyTo(output) }
+                val exif = androidx.exifinterface.media.ExifInterface(tempFile.absolutePath)
+                val timeStr = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_ORIGINAL)
+                tempFile.delete()
+
+                if (timeStr != null) {
+                    val sdf = java.text.SimpleDateFormat("yyyy:MM:dd HH:mm:ss", java.util.Locale.US)
+                    val date = sdf.parse(timeStr)
+                    ZonedDateTime.ofInstant(date?.toInstant(), java.time.ZoneId.systemDefault())
+                } else null
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -821,19 +892,61 @@ class MainActivity : ComponentActivity() {
                     return@launch
                 }
 
-                val result = photoProcessor.processPhotos(uris, points, stepData.timestamps)
+                val startTime = stepData.timestamps.first()
+                val endTime = stepData.timestamps.last()
 
-                withContext(Dispatchers.Main) {
-                    if (result.successCount > 0) {
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Updated ${result.successCount} photos",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                // Separate photos by timestamp
+                val photosInRange = mutableListOf<Uri>()
+                val photosOutOfRange = mutableListOf<Uri>()
+
+                for (uri in uris) {
+                    val photoTime = getPhotoTimestamp(uri)
+                    if (photoTime != null && (photoTime.isBefore(startTime) || photoTime.isAfter(endTime))) {
+                        photosOutOfRange.add(uri)
+                    } else {
+                        photosInRange.add(uri)
+                    }
+                }
+
+                // Process in-range photos normally
+                if (photosInRange.isNotEmpty()) {
+                    val result = photoProcessor.processPhotos(photosInRange, points, stepData.timestamps)
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@MainActivity, "Updated ${result.successCount} photos", Toast.LENGTH_SHORT).show()
+                    }
+                }
+
+                // Handle out-of-range photos with manual selection
+                if (photosOutOfRange.isNotEmpty()) {
+                    photosNeedingManualLocation.value = photosOutOfRange
+                    selectedTrackpointIndex.value = points.size / 2 // Start at middle
+                    withContext(Dispatchers.Main) {
+                        showMapFlow.value = true
+                        Toast.makeText(this@MainActivity, "${photosOutOfRange.size} photos need manual location", Toast.LENGTH_LONG).show()
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Photo error: ${e.message}", e)
+            }
+        }
+    }
+
+    private fun applyManualLocationToPhotos() {
+        scope.launch {
+            try {
+                val points = repository.loadTrailPoints()
+                val index = selectedTrackpointIndex.value.coerceIn(0, points.size - 1)
+                val location = points[index]
+
+                val uris = photosNeedingManualLocation.value
+                val result = photoProcessor.processPhotosWithFixedLocation(uris, location)
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Tagged ${result.successCount} photos", Toast.LENGTH_SHORT).show()
+                    photosNeedingManualLocation.value = emptyList()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Manual tagging error: ${e.message}", e)
             }
         }
     }

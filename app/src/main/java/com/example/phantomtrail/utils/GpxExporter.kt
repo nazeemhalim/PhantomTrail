@@ -53,12 +53,6 @@ class GpxExporter {
         timestamps: List<ZonedDateTime>,
         totalSteps: Int
     ): String {
-        val trackpoints = StringBuilder()
-        val stepLength = 0.75 // meters - should come from settings
-
-        // Create straight-line distance based on step count
-        val theoreticalDistance = (totalSteps * stepLength) / 1000.0 // km
-
         val distances = mutableListOf(0.0)
         for (i in 1 until points.size) {
             val dist = GeoUtils.calculateHaversineDistance(
@@ -67,26 +61,43 @@ class GpxExporter {
             )
             distances.add(distances.last() + dist)
         }
-
-        // Scale trail to match theoretical distance
         val trailDistance = distances.last()
-        val scaleFactor = theoreticalDistance / trailDistance
 
-        for (i in timestamps.indices) {
-            val progress = if (timestamps.size > 1) {
-                i.toDouble() / (timestamps.size - 1)
-            } else 0.0
+        val trackpoints = StringBuilder()
 
-            val targetDistance = progress * trailDistance * scaleFactor
+        // Calculate total active time (excluding long pauses)
+        var totalActiveSeconds = 0L
+        for (i in 1 until timestamps.size) {
+            val gap = Duration.between(timestamps[i-1], timestamps[i]).seconds
+            if (gap < 300) { // Skip 5+ minute gaps
+                totalActiveSeconds += gap
+            }
+        }
+
+        // Space trackpoints ~4 seconds apart (like real GPS)
+        val targetInterval = 4.0
+        val numTrackpoints = (totalActiveSeconds / targetInterval).toInt().coerceAtLeast(timestamps.size / 10)
+
+        val startTime = timestamps.first()
+        val endTime = timestamps.last()
+
+        for (i in 0 until numTrackpoints) {
+            val progress = i.toDouble() / (numTrackpoints - 1).coerceAtLeast(1)
+            val targetDistance = progress * trailDistance
             val location = interpolateLocation(points, distances, targetDistance)
+
+            // Evenly spread time
+            val timeOffset = (totalActiveSeconds * progress).toLong()
+            val time = startTime.plusSeconds(timeOffset)
 
             trackpoints.append(createTrackpoint(
                 location.latitude,
                 location.longitude,
-                timestamps[i].format(DateTimeFormatter.ISO_INSTANT)
+                time.format(DateTimeFormatter.ISO_INSTANT)
             ))
         }
 
+        Log.d(TAG, "Generated $numTrackpoints trackpoints (~4sec intervals)")
         return trackpoints.toString()
     }
 

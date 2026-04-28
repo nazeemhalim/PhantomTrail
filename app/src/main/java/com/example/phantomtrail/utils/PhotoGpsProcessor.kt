@@ -117,6 +117,60 @@ class PhotoGpsProcessor(
         return resultUri
     }
 
+    suspend fun processPhotosWithFixedLocation(
+        photoUris: List<Uri>,
+        location: GeoPoint
+    ): ProcessResult {
+        var successCount = 0
+        var errorCount = 0
+        val savedPhotoUris = mutableListOf<Uri>()
+
+        for (uri in photoUris) {
+            try {
+                val result = processPhotoWithFixedLocation(uri, location)
+                if (result != null) {
+                    savedPhotoUris.add(result)
+                    successCount++
+                } else {
+                    errorCount++
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error processing photo $uri: ${e.message}", e)
+                errorCount++
+            }
+        }
+
+        return ProcessResult(successCount, errorCount, savedPhotoUris)
+    }
+
+    private fun processPhotoWithFixedLocation(uri: Uri, location: GeoPoint): Uri? {
+        val tempFile = File(context.cacheDir, "temp_${System.currentTimeMillis()}.jpg")
+
+        contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(tempFile).use { output ->
+                input.copyTo(output)
+            }
+        }
+
+        val exif = ExifInterface(tempFile.absolutePath)
+        updateGpsCoordinates(exif, location)
+        exif.saveAttributes()
+
+        var overwritten = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            overwritten = tryOverwriteOriginal(uri, tempFile)
+        }
+
+        val resultUri = if (!overwritten) {
+            savePhotoToSameDirectory(uri, tempFile)
+        } else {
+            uri
+        }
+
+        tempFile.delete()
+        return resultUri
+    }
+
     private fun getPhotoTimestamp(exif: ExifInterface, fallbackTime: ZonedDateTime): ZonedDateTime {
         val photoTimeStr = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
             ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
