@@ -48,6 +48,7 @@ import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
 import java.io.File
 import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import kotlin.math.*
 import android.graphics.Color as AndroidColor
 
@@ -94,9 +95,11 @@ class MainActivity : ComponentActivity() {
         private var accumulatedDistance = 0.0
 
         // Slider
-        private val selectedTrackpointIndex = MutableStateFlow(0)
+        data class PhotoToTag(val uri: Uri, val timestamp: ZonedDateTime?)
+        private val photosNeedingManualLocation = MutableStateFlow<List<PhotoToTag>>(emptyList())
 
-        private val photosNeedingManualLocation = MutableStateFlow<List<Uri>>(emptyList())
+        private val selectedPhotoIndex = MutableStateFlow(0)
+        private val selectedTrackpointIndex = MutableStateFlow(0)
 
         val trailPoints = MutableStateFlow<List<GeoPoint>>(emptyList())
         val customStartLat = MutableStateFlow(START_LAT)
@@ -450,80 +453,137 @@ class MainActivity : ComponentActivity() {
             }
 
             Spacer(modifier = Modifier.height(64.dp))
-            Text("V1.5.1", color = Color.DarkGray, fontSize = 12.sp)
+            Text("V1.5.2", color = Color.DarkGray, fontSize = 12.sp)
         }
     }
 
     @Composable
     fun MapScreen(serviceSteps: Int, serviceTracking: Boolean) {
         val photosNeedingLocation by photosNeedingManualLocation.collectAsState()
+        val currentPhotoIndex by selectedPhotoIndex.collectAsState()
         val sliderPosition by selectedTrackpointIndex.collectAsState()
         val points by trailPoints.collectAsState()
+        val isSelecting by isSelectingStartLocation.collectAsState()
 
         Box(modifier = Modifier.fillMaxSize()) {
             OSMMapView()
-            val isSelecting by isSelectingStartLocation.collectAsState()
 
-            Button(
-                onClick = {
-                    showMapFlow.value = false
-                    isSelectingStartLocation.value = false
-                },
-                modifier = Modifier.align(Alignment.TopEnd).padding(16.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
-            ) {
-                Text("close", color = Color.White)
-            }
+            // Hide buttons when photo tagging is active
+            val showButtons = photosNeedingLocation.isEmpty()
 
-            if (!isSelecting) {
+            if (showButtons) {
                 Button(
-                    onClick = { isSelectingStartLocation.value = true },
-                    modifier = Modifier.align(Alignment.TopStart).padding(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4A7C59))
+                    onClick = {
+                        showMapFlow.value = false
+                        isSelectingStartLocation.value = false
+                    },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
                 ) {
-                    Text("set start", color = Color.White)
+                    Text("close", color = Color.White)
                 }
-            } else {
-                Text(
-                    "Tap on map to set start location",
-                    color = Color.White,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(16.dp)
-                        .background(Color.Black.copy(alpha = 0.7f))
-                        .padding(8.dp)
-                )
+
+                if (!isSelecting) {
+                    Button(
+                        onClick = { isSelectingStartLocation.value = true },
+                        modifier = Modifier.align(Alignment.TopStart).padding(16.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4A7C59))
+                    ) {
+                        Text("set start", color = Color.White)
+                    }
+                } else {
+                    Text(
+                        "Tap on map to set start location",
+                        color = Color.White,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(16.dp)
+                            .background(Color.Black.copy(alpha = 0.7f))
+                            .padding(8.dp)
+                    )
+                }
+
+                Button(
+                    onClick = {},
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(128.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
+                ) {
+                    Text("$serviceSteps", color = Color.White)
+                }
+
+                Button(
+                    onClick = { if (serviceTracking) pauseTracking() else startButton() },
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 64.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (serviceTracking) Color(0xFFFFA500) else Color(0xFF4A7C59)
+                    )
+                ) {
+                    Text(if (serviceTracking) "pause" else "start", color = Color.White)
+                }
             }
 
-            Button(
-                onClick = {},
-                modifier = Modifier.align(Alignment.BottomCenter).padding(128.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
-            ) {
-                Text("$serviceSteps", color = Color.White)
-            }
-
-            Button(
-                onClick = { if (serviceTracking) pauseTracking() else startButton() },
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 64.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (serviceTracking) Color(0xFFFFA500) else Color(0xFF4A7C59)
-                )
-            ) {
-                Text(if (serviceTracking) "pause" else "start", color = Color.White)
-            }
-
-            // Slider for manual photo location
-            if (photosNeedingLocation.isNotEmpty()) {
+            // Photo tagging UI
+            if (photosNeedingLocation.isNotEmpty() && currentPhotoIndex < photosNeedingLocation.size) {
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(16.dp)
-                        .background(Color.Black.copy(alpha = 0.8f))
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.9f))
                         .padding(16.dp)
                 ) {
-                    Text("Select location for ${photosNeedingLocation.size} photos", color = Color.White)
+                    Text(
+                        "Photo ${currentPhotoIndex + 1} of ${photosNeedingLocation.size}",
+                        color = Color.White,
+                        fontSize = 16.sp
+                    )
+
                     Spacer(modifier = Modifier.height(8.dp))
+
+                    // Thumbnail with margin - smaller size
+                    val currentPhoto = photosNeedingLocation[currentPhotoIndex]
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp)
+                            .padding(horizontal = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AndroidView(
+                            factory = { ctx ->
+                                android.widget.ImageView(ctx).apply {
+                                    scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                                    adjustViewBounds = true
+                                }
+                            },
+                            update = { imageView ->
+                                try {
+                                    val bitmap = contentResolver.openInputStream(currentPhoto.uri)?.use {
+                                        android.graphics.BitmapFactory.decodeStream(it)
+                                    }
+                                    imageView.setImageBitmap(bitmap)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Error loading thumbnail: ${e.message}")
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(100.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    currentPhoto.timestamp?.let {
+                        Text(
+                            "Photo taken: ${it.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))}",
+                            color = Color.Gray,
+                            fontSize = 12.sp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text("Select location on trail", color = Color.White, fontSize = 14.sp)
 
                     androidx.compose.material3.Slider(
                         value = sliderPosition.toFloat(),
@@ -532,11 +592,37 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    Text("Trackpoint ${sliderPosition + 1} of ${points.size}", color = Color.Gray, fontSize = 12.sp)
+                    Text(
+                        "Trackpoint ${sliderPosition + 1} of ${points.size}",
+                        color = Color.Gray,
+                        fontSize = 12.sp
+                    )
 
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = { applyManualLocationToPhotos() }) {
-                        Text("Apply Location")
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Button(
+                            onClick = {
+                                val remaining = photosNeedingLocation.filterIndexed { i, _ -> i != currentPhotoIndex }
+                                photosNeedingManualLocation.value = remaining
+                                if (remaining.isEmpty()) {
+                                    Toast.makeText(this@MainActivity, "Skipped all photos", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFA500))
+                        ) {
+                            Text("Skip",
+                                color = Color.White)
+                        }
+
+                        Button(onClick = { applyManualLocationToCurrentPhoto() },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4A7C59))) {
+                            Text("Apply to This Photo",
+                                color = Color.White)
+                        }
                     }
                 }
             }
@@ -725,6 +811,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopAndResetSteps() {
+        // Stop service if running
         if (StepCounterService.isRunning.value) {
             val serviceIntent = Intent(this, StepCounterService::class.java).apply {
                 action = StepCounterService.ACTION_STOP
@@ -732,6 +819,7 @@ class MainActivity : ComponentActivity() {
             startService(serviceIntent)
         }
 
+        // Reset all state
         StepCounterService.currentStepCount.value = 0
         trailPoints.value = listOf(GeoPoint(customStartLat.value, customStartLon.value))
         lastProcessedSteps = 0
@@ -739,14 +827,14 @@ class MainActivity : ComponentActivity() {
         accumulatedDistance = 0.0
 
         scope.launch {
-            scope.launch {
-                repository.resetAllData()
-                repository.saveStartLocation(customStartLat.value, customStartLon.value)
-                repository.saveTrailPoints(trailPoints.value)
+            repository.resetAllData()
+            repository.saveStartLocation(customStartLat.value, customStartLon.value)
+            repository.saveTrailPoints(trailPoints.value)
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "Reset complete", Toast.LENGTH_SHORT).show()
             }
         }
-
-        Toast.makeText(this, "Reset", Toast.LENGTH_SHORT).show()
     }
 
     private fun startButton() {
@@ -762,8 +850,14 @@ class MainActivity : ComponentActivity() {
                 .setPositiveButton("OK") { dialog, _ ->
                     when (checkedItems) {
                         0 -> {
-                            stopAndResetSteps()
-                            startTracking()
+                            // Stop service first, wait, then reset and start
+                            scope.launch {
+                                stopAndResetSteps()
+                                delay(500) // Wait for service to fully stop
+                                withContext(Dispatchers.Main) {
+                                    startTracking()
+                                }
+                            }
                         }
                         1 -> startTracking()
                     }
@@ -773,6 +867,7 @@ class MainActivity : ComponentActivity() {
                 .show()
         }
     }
+
 
     private fun exportGPX() {
         scope.launch {
@@ -895,31 +990,31 @@ class MainActivity : ComponentActivity() {
                 val startTime = stepData.timestamps.first()
                 val endTime = stepData.timestamps.last()
 
-                // Separate photos by timestamp
                 val photosInRange = mutableListOf<Uri>()
-                val photosOutOfRange = mutableListOf<Uri>()
+                val photosOutOfRange = mutableListOf<PhotoToTag>()
 
                 for (uri in uris) {
                     val photoTime = getPhotoTimestamp(uri)
                     if (photoTime != null && (photoTime.isBefore(startTime) || photoTime.isAfter(endTime))) {
-                        photosOutOfRange.add(uri)
+                        photosOutOfRange.add(PhotoToTag(uri, photoTime))
                     } else {
                         photosInRange.add(uri)
                     }
                 }
 
-                // Process in-range photos normally
+                // Process in-range photos
                 if (photosInRange.isNotEmpty()) {
                     val result = photoProcessor.processPhotos(photosInRange, points, stepData.timestamps)
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(this@MainActivity, "Updated ${result.successCount} photos", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@MainActivity, "Auto-tagged ${result.successCount} photos", Toast.LENGTH_SHORT).show()
                     }
                 }
 
-                // Handle out-of-range photos with manual selection
+                // Show slider for out-of-range photos
                 if (photosOutOfRange.isNotEmpty()) {
                     photosNeedingManualLocation.value = photosOutOfRange
-                    selectedTrackpointIndex.value = points.size / 2 // Start at middle
+                    selectedPhotoIndex.value = 0
+                    selectedTrackpointIndex.value = points.size / 2
                     withContext(Dispatchers.Main) {
                         showMapFlow.value = true
                         Toast.makeText(this@MainActivity, "${photosOutOfRange.size} photos need manual location", Toast.LENGTH_LONG).show()
@@ -931,23 +1026,44 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun applyManualLocationToPhotos() {
+    private fun applyManualLocationToCurrentPhoto() {
         scope.launch {
             try {
+                val photos = photosNeedingManualLocation.value
+                val photoIndex = selectedPhotoIndex.value
                 val points = repository.loadTrailPoints()
-                val index = selectedTrackpointIndex.value.coerceIn(0, points.size - 1)
-                val location = points[index]
+                val trackpointIndex = selectedTrackpointIndex.value.coerceIn(0, points.size - 1)
 
-                val uris = photosNeedingManualLocation.value
-                val result = photoProcessor.processPhotosWithFixedLocation(uris, location)
+                if (photoIndex >= photos.size) return@launch
+
+                val location = points[trackpointIndex]
+                val result = photoProcessor.processPhotosWithFixedLocation(
+                    listOf(photos[photoIndex].uri),
+                    location
+                )
 
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Tagged ${result.successCount} photos", Toast.LENGTH_SHORT).show()
-                    photosNeedingManualLocation.value = emptyList()
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Tagged photo ${photoIndex + 1}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                    // Move to next photo or close
+                    val remaining = photos.filterIndexed { i, _ -> i != photoIndex }
+                    if (remaining.isNotEmpty()) {
+                        photosNeedingManualLocation.value = remaining
+                        selectedPhotoIndex.value = 0
+                        selectedTrackpointIndex.value = points.size / 2
+                    } else {
+                        photosNeedingManualLocation.value = emptyList()
+                        Toast.makeText(this@MainActivity, "All photos tagged", Toast.LENGTH_SHORT)
+                            .show()
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Manual tagging error: ${e.message}", e)
             }
         }
     }
-}
+    }

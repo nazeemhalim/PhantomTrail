@@ -65,39 +65,39 @@ class GpxExporter {
 
         val trackpoints = StringBuilder()
 
-        // Calculate total active time (excluding long pauses)
-        var totalActiveSeconds = 0L
-        for (i in 1 until timestamps.size) {
-            val gap = Duration.between(timestamps[i-1], timestamps[i]).seconds
-            if (gap < 300) { // Skip 5+ minute gaps
-                totalActiveSeconds += gap
-            }
-        }
+        // Sample real timestamps at GPS-like intervals (every ~10-15 steps)
+        val stepsPerTrackpoint = 10
+        var lastTime = timestamps.first()
 
-        // Space trackpoints ~4 seconds apart (like real GPS)
-        val targetInterval = 4.0
-        val numTrackpoints = (totalActiveSeconds / targetInterval).toInt().coerceAtLeast(timestamps.size / 10)
+        for (i in 0 until timestamps.size step stepsPerTrackpoint) {
+            val timestampIndex = i.coerceAtMost(timestamps.size - 1)
+            val currentTime = timestamps[timestampIndex]
 
-        val startTime = timestamps.first()
-        val endTime = timestamps.last()
+            // Skip if time gap is too large (pause detection)
+            val gap = Duration.between(lastTime, currentTime).seconds
+            if (gap > 300) continue
 
-        for (i in 0 until numTrackpoints) {
-            val progress = i.toDouble() / (numTrackpoints - 1).coerceAtLeast(1)
+            val progress = i.toDouble() / (timestamps.size - 1)
             val targetDistance = progress * trailDistance
             val location = interpolateLocation(points, distances, targetDistance)
-
-            // Evenly spread time
-            val timeOffset = (totalActiveSeconds * progress).toLong()
-            val time = startTime.plusSeconds(timeOffset)
 
             trackpoints.append(createTrackpoint(
                 location.latitude,
                 location.longitude,
-                time.format(DateTimeFormatter.ISO_INSTANT)
+                currentTime.format(DateTimeFormatter.ISO_INSTANT)
             ))
+
+            lastTime = currentTime
         }
 
-        Log.d(TAG, "Generated $numTrackpoints trackpoints (~4sec intervals)")
+        // Always add last point
+        trackpoints.append(createTrackpoint(
+            points.last().latitude,
+            points.last().longitude,
+            timestamps.last().format(DateTimeFormatter.ISO_INSTANT)
+        ))
+
+        Log.d(TAG, "Generated trackpoints with real pace variations")
         return trackpoints.toString()
     }
 
