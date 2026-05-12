@@ -64,10 +64,9 @@ class GpxExporter {
         val trailDistance = distances.last()
 
         val trackpoints = StringBuilder()
-
-        // Sample real timestamps at GPS-like intervals (every ~10-15 steps)
         val stepsPerTrackpoint = 10
         var lastTime = timestamps.first()
+        var lastAddedIndex = 0
 
         for (i in 0 until timestamps.size step stepsPerTrackpoint) {
             val timestampIndex = i.coerceAtMost(timestamps.size - 1)
@@ -88,14 +87,18 @@ class GpxExporter {
             ))
 
             lastTime = currentTime
+            lastAddedIndex = timestampIndex
         }
 
-        // Always add last point
-        trackpoints.append(createTrackpoint(
-            points.last().latitude,
-            points.last().longitude,
-            timestamps.last().format(DateTimeFormatter.ISO_INSTANT)
-        ))
+        // Add last point ONLY if it's close in time to the previous point
+        val lastGap = Duration.between(lastTime, timestamps.last()).seconds
+        if (lastGap <= 300 && lastAddedIndex < timestamps.size - 1) {
+            trackpoints.append(createTrackpoint(
+                points.last().latitude,
+                points.last().longitude,
+                timestamps.last().format(DateTimeFormatter.ISO_INSTANT)
+            ))
+        }
 
         Log.d(TAG, "Generated trackpoints with real pace variations")
         return trackpoints.toString()
@@ -136,7 +139,7 @@ class GpxExporter {
     }
 
     private fun createGpxContent(trackpoints: String, startTime: String): String {
-        return """"<?xml version="1.0" encoding="UTF-8"?>
+        return """<?xml version="1.0" encoding="UTF-8"?>
 <gpx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd" creator="PhantomTrail" version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
  <metadata>
   <time>$startTime</time>
@@ -148,6 +151,5 @@ class GpxExporter {
 $trackpoints </trkseg>
  </trk>
 </gpx>"""
-
     }
 }

@@ -50,6 +50,10 @@ import java.io.File
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlin.math.*
+import android.content.ContentValues
+import android.os.Environment
+import android.provider.MediaStore
+import android.media.MediaScannerConnection
 import android.graphics.Color as AndroidColor
 
 class MainActivity : ComponentActivity() {
@@ -452,8 +456,7 @@ class MainActivity : ComponentActivity() {
                 Text("map", color = Color.White, fontSize = 18.sp)
             }
 
-            Spacer(modifier = Modifier.height(64.dp))
-            Text("V1.5.2", color = Color.DarkGray, fontSize = 12.sp)
+
         }
     }
 
@@ -870,36 +873,17 @@ class MainActivity : ComponentActivity() {
 
 
     private fun exportGPX() {
-        scope.launch {
-            try {
-                val stepData = repository.loadStepData()
-                val points = repository.loadTrailPoints()
+        val options = arrayOf("Share GPX", "Save to Downloads")
 
-                if (stepData.steps < 2 || stepData.timestamps.size < 2) {
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(this@MainActivity, "Not enough steps", Toast.LENGTH_SHORT).show()
-                    }
-                    return@launch
-                }
-
-                val dir = externalCacheDir ?: cacheDir
-                val gpxFile = gpxExporter.generateGpxFile(dir, points, stepData.timestamps, stepData.steps)
-
-                withContext(Dispatchers.Main) {
-                    shareGPXFile(gpxFile)
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Exported ${stepData.steps} steps",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Export error: ${e.message}", e)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Export failed", Toast.LENGTH_LONG).show()
+        AlertDialog.Builder(this)
+            .setTitle("Export GPX")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> shareGPX()
+                    1 -> saveGPXLocally()
                 }
             }
-        }
+            .show()
     }
 
     private fun shareGPXFile(file: File) {
@@ -914,6 +898,106 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "Share error: ${e.message}")
             Toast.makeText(this, "Saved to: ${file.absolutePath}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun shareGPX() {  // Changed from shareGPXFile
+        scope.launch {
+            try {
+                val stepData = repository.loadStepData()
+                val points = repository.loadTrailPoints()
+
+                if (stepData.steps < 2 || stepData.timestamps.size < 2) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@MainActivity, "Not enough steps", Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+
+                val gpxFile = gpxExporter.generateGpxFile(
+                    cacheDir,
+                    points,
+                    stepData.timestamps,
+                    stepData.steps
+                )
+
+                withContext(Dispatchers.Main) {
+                    shareGPXFile(gpxFile)  // This calls the existing function with File parameter
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Export error: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Export failed", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun saveGPXLocally() {
+        scope.launch {
+            try {
+                val stepData = repository.loadStepData()
+                val points = repository.loadTrailPoints()
+
+                if (stepData.steps < 2 || stepData.timestamps.size < 2) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@MainActivity, "Not enough steps", Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+
+                // Generate in cache first
+                val tempFile = gpxExporter.generateGpxFile(
+                    cacheDir,
+                    points,
+                    stepData.timestamps,
+                    stepData.steps
+                )
+
+                // Save to Downloads
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, tempFile.name)
+                        put(MediaStore.Downloads.MIME_TYPE, "application/gpx+xml")
+                        put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    }
+
+                    val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    uri?.let {
+                        contentResolver.openOutputStream(it)?.use { output ->
+                            tempFile.inputStream().use { input ->
+                                input.copyTo(output)
+                            }
+                        }
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@MainActivity, "Saved to Downloads", Toast.LENGTH_LONG).show()
+                    }
+                } else {
+                    val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                    val savedFile = File(downloadsDir, tempFile.name)
+                    tempFile.copyTo(savedFile, overwrite = true)
+
+                    MediaScannerConnection.scanFile(
+                        this@MainActivity,
+                        arrayOf(savedFile.absolutePath),
+                        arrayOf("application/gpx+xml"),
+                        null
+                    )
+
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@MainActivity, "Saved to Downloads/${savedFile.name}", Toast.LENGTH_LONG).show()
+                    }
+                }
+
+                tempFile.delete()
+            } catch (e: Exception) {
+                Log.e(TAG, "Save error: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Save failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 

@@ -19,7 +19,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
- * Foreground service for continuous step counting
+ * Foreground service step counting
  */
 class StepCounterService : Service(), SensorEventListener {
 
