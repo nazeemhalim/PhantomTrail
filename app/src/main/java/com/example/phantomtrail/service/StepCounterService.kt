@@ -13,22 +13,27 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.example.phantomtrail.FollowGpxActivity
 import com.example.phantomtrail.MainActivity
+import com.example.phantomtrail.data.FollowGpxStepRepository
 import com.example.phantomtrail.data.StepRepository
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
+import java.time.ZonedDateTime
 
 /**
  * Foreground service step counting
  */
+
+enum class ActiveActivity { NONE, MAIN, FOLLOW_GPX }
+
 class StepCounterService : Service(), SensorEventListener {
 
     private lateinit var sensorManager: SensorManager
     private var stepSensor: Sensor? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    private lateinit var stepCountingManager: StepCountingManager
     private lateinit var repository: StepRepository
+    private lateinit var stepCountingManager: StepCountingManager
 
     private var notificationManager: NotificationManager? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -39,16 +44,23 @@ class StepCounterService : Service(), SensorEventListener {
         const val CHANNEL_ID = "StepCounterChannel"
         const val NOTIFICATION_ID = 1
         private const val TAG = "StepCounterService"
-
+        val isMainRunning = MutableStateFlow(false)
+        val isFollowGpxRunning = MutableStateFlow(false)
         const val ACTION_START = "ACTION_START"
         const val ACTION_STOP = "ACTION_STOP"
+        const val ACTION_RESET = "ACTION_RESET"
 
+        private var instance: StepCounterService? = null
+        fun getTimestamps(): List<ZonedDateTime> = instance?.stepCountingManager?.getTimestamps() ?: emptyList<ZonedDateTime>()
         val isRunning = MutableStateFlow(false)
         val currentStepCount = MutableStateFlow(0)
+
+        val activeActivity = MutableStateFlow(ActiveActivity.NONE)
     }
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         Log.d(TAG, "Service onCreate")
 
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
@@ -59,19 +71,24 @@ class StepCounterService : Service(), SensorEventListener {
 
         // Initialize step counting manager
         stepCountingManager = StepCountingManager(
-            repository = repository,
             scope = scope,
             onStepUpdate = { updateStepCount() }
         )
 
         scope.launch {
             try {
-                stepCountingManager.initialize()
+                val initialSteps = when (activeActivity.value) {
+                    ActiveActivity.FOLLOW_GPX -> 0
+                    else -> {
+                        repository.loadStepData().steps
+                    }
+                }
+                stepCountingManager.initialize(initialSteps, emptyList())
                 currentStepCount.value = stepCountingManager.getCurrentSteps()
                 isInitialized = true
-                Log.d(TAG, "Service initialized with ${currentStepCount.value} steps")
+                Log.d(TAG, "Service initialized with $initialSteps steps")
             } catch (e: Exception) {
-                Log.e(TAG, "Error initializing service: ${e.message}", e)
+                Log.e(TAG, "Error initializing: ${e.message}", e)
             }
         }
     }
@@ -104,10 +121,15 @@ class StepCounterService : Service(), SensorEventListener {
                 }
             }
             ACTION_STOP -> stopTracking()
+            ACTION_RESET -> {
+                stepCountingManager.reset()
+            }
         }
 
         return START_STICKY
     }
+
+
 
     private fun startTracking() {
         try {
@@ -240,6 +262,8 @@ class StepCounterService : Service(), SensorEventListener {
         updateNotification()
     }
 
+
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -256,7 +280,10 @@ class StepCounterService : Service(), SensorEventListener {
     }
 
     private fun createNotification(): Notification {
-        val notificationIntent = Intent(this, MainActivity::class.java)
+        val notificationIntent = when (activeActivity.value) {
+            ActiveActivity.FOLLOW_GPX -> Intent(this, FollowGpxActivity::class.java)
+            else -> Intent(this, MainActivity::class.java)
+        }
         val pendingIntent = PendingIntent.getActivity(
             this, 0, notificationIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -270,9 +297,15 @@ class StepCounterService : Service(), SensorEventListener {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        // Show correct steps based on active activity
+        val displaySteps = when (activeActivity.value) {
+            ActiveActivity.FOLLOW_GPX -> FollowGpxActivity.followGpxSteps.value
+            else -> currentStepCount.value
+        }
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Phantom Trail")
-            .setContentText("Steps: ${currentStepCount.value}")
+            .setContentText("Steps: $displaySteps")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pendingIntent)
             .addAction(android.R.drawable.ic_media_pause, "Stop", stopPendingIntent)
@@ -291,6 +324,7 @@ class StepCounterService : Service(), SensorEventListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        instance = this
         Log.d(TAG, "Service onDestroy")
         sensorManager.unregisterListener(this)
         releaseWakeLock()

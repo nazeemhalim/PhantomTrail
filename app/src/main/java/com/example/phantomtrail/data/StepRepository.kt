@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import org.osmdroid.util.GeoPoint
 import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 private val Context.dataStore by preferencesDataStore(name = "step_counter")
 
@@ -69,6 +70,19 @@ class StepRepository(private val context: Context) {
             } else null
         }
     }
+    suspend fun saveTimestamps(timestamps: List<ZonedDateTime>) {
+        context.dataStore.edit { prefs ->
+            val timestampsStr = timestamps.joinToString(";") {
+                it.format(DateTimeFormatter.ISO_ZONED_DATE_TIME)
+            }
+            prefs[TIMESTAMPS_KEY] = timestampsStr
+        }
+    }
+    suspend fun saveSteps(steps: Int) {
+        context.dataStore.edit { prefs ->
+            prefs[STEPS_KEY] = steps
+        }
+    }
 
     suspend fun saveStepData(
         steps: Int,
@@ -78,7 +92,7 @@ class StepRepository(private val context: Context) {
         context.dataStore.edit { prefs ->
             prefs[STEPS_KEY] = steps
             prefs[INITIAL_SENSOR_COUNT_KEY] = initialSensorCount
-            prefs[TIMESTAMPS_KEY] = timestamps.joinToString(",")
+            prefs[TIMESTAMPS_KEY] = timestamps.joinToString(";")
         }
         Log.d(TAG, "Saved steps: $steps, initial sensor: $initialSensorCount")
     }
@@ -115,7 +129,7 @@ class StepRepository(private val context: Context) {
     private fun parseTimestamps(timestampsStr: String?): List<ZonedDateTime> {
         if (timestampsStr.isNullOrBlank()) return emptyList()
 
-        return timestampsStr.split(",").mapNotNull { ts ->
+        return timestampsStr.split(";").mapNotNull { ts ->
             if (ts.isNotBlank()) {
                 try {
                     ZonedDateTime.parse(ts)

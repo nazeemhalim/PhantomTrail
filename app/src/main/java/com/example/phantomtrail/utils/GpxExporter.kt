@@ -25,6 +25,14 @@ class GpxExporter {
         timestamps: List<ZonedDateTime>,
         totalSteps: Int
     ): File {
+        val effectiveTimestamps = if (timestamps.size < 2) {
+            val now = ZonedDateTime.now()
+            val startTime = now.minusSeconds(totalSteps.toLong()) // ~1 step per second
+            (0 until totalSteps).map { startTime.plusSeconds(it.toLong()) }
+        } else {
+            timestamps
+        }
+
         if (!outputDir.exists()) {
             outputDir.mkdirs()
         }

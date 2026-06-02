@@ -12,7 +12,6 @@ import java.time.ZonedDateTime
  * Handles step counting logic and state management
  */
 class StepCountingManager(
-    private val repository: StepRepository,
     private val scope: CoroutineScope,
     private val onStepUpdate: () -> Unit
 ) {
@@ -29,20 +28,26 @@ class StepCountingManager(
     private var lastSaveTime = 0L
     private val SAVE_INTERVAL_MS = 5000L // Save every 5 seconds max
 
-    suspend fun initialize() {
+    suspend fun initialize(initialSteps: Int = 0, initialTimestamps: List<ZonedDateTime> = emptyList()) {
         try {
-            val stepData = repository.loadStepData()
-            currentSteps = stepData.steps
-            initialStepCount = -1 // Always reset on initialization to handle phone reboots
+            currentSteps = initialSteps
+            initialStepCount = -1
             stepTimestamps.clear()
-            stepTimestamps.addAll(stepData.timestamps)
+            stepTimestamps.addAll(initialTimestamps)
             isInitialized = true
 
             Log.d(TAG, "Initialized with $currentSteps steps, ${stepTimestamps.size} timestamps")
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing: ${e.message}", e)
-            isInitialized = true // Continue anyway with defaults
+            isInitialized = true
         }
+    }
+    fun reset() {
+        currentSteps = 0
+        initialStepCount = -1
+        stepTimestamps.clear()
+        lastSaveTime = 0L
+        Log.d(TAG, "StepCountingManager reset to 0")
     }
 
     fun onSensorChanged(event: SensorEvent) {
@@ -76,7 +81,6 @@ class StepCountingManager(
             if (initialStepCount == -1) {
                 initialStepCount = totalSteps - currentSteps
                 Log.d(TAG, "Set initial sensor count: $initialStepCount")
-                saveNow()
             }
 
             val newStepCount = totalSteps - initialStepCount
@@ -111,19 +115,10 @@ class StepCountingManager(
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastSaveTime > SAVE_INTERVAL_MS) {
             lastSaveTime = currentTime
-            saveNow()
         }
     }
 
-    private fun saveNow() {
-        scope.launch {
-            try {
-                repository.saveStepData(currentSteps, initialStepCount, stepTimestamps)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error saving in background: ${e.message}", e)
-            }
-        }
-    }
+
 
     fun getCurrentSteps() = currentSteps
     fun getTimestamps() = stepTimestamps.toList()

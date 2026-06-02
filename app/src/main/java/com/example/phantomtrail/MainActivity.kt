@@ -34,6 +34,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.phantomtrail.data.StepRepository
 import com.example.phantomtrail.service.StepCounterService
+
 import com.example.phantomtrail.ui.theme.PhantomTrailTheme
 import com.example.phantomtrail.utils.GpxExporter
 import com.example.phantomtrail.utils.PhotoGpsProcessor
@@ -59,6 +60,7 @@ import android.graphics.Color as AndroidColor
 class MainActivity : ComponentActivity() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var isActive = false  // ADD THIS
 
     // Refactored components - KEEP THESE
     private lateinit var repository: StepRepository
@@ -90,6 +92,7 @@ class MainActivity : ComponentActivity() {
 
         private val TRAIL_POINTS_KEY = stringPreferencesKey("trail_points")
 
+        val activityBaselineSteps = MutableStateFlow(0)
         private val stepLengthMeters = MutableStateFlow(0.75)
         private val showMapFlow = MutableStateFlow(false)
 
@@ -99,7 +102,6 @@ class MainActivity : ComponentActivity() {
         private var accumulatedDistance = 0.0
 
         // Slider
-        data class PhotoToTag(val uri: Uri, val timestamp: ZonedDateTime?)
         private val photosNeedingManualLocation = MutableStateFlow<List<PhotoToTag>>(emptyList())
 
         private val selectedPhotoIndex = MutableStateFlow(0)
@@ -135,17 +137,21 @@ class MainActivity : ComponentActivity() {
 
         // Observe step count changes
         scope.launch(Dispatchers.Main) {
-            StepCounterService.currentStepCount.collect { steps ->
-                Log.d(TAG, "Step count changed to: $steps")
-                if (steps > 0) {
-                    updateTrailPoints()
+            StepCounterService.currentStepCount.collect { totalSteps ->
+                if (StepCounterService.activeActivity.value != com.example.phantomtrail.service.ActiveActivity.MAIN) return@collect
+                scope.launch {
+                    repository.saveSteps(totalSteps)
+                    // Save timestamps from service
+                    val timestamps = StepCounterService.getTimestamps()
+                    repository.saveTimestamps(timestamps)
                 }
+                if (totalSteps > 0) updateTrailPoints(totalSteps)
             }
         }
 
         setContent {
             val serviceSteps by StepCounterService.currentStepCount.collectAsState()
-            val serviceTracking by StepCounterService.isRunning.collectAsState()
+            val serviceTracking by StepCounterService.isMainRunning.collectAsState()
             val stepLength by stepLengthMeters.collectAsState()
             val showMap by showMapFlow.collectAsState()
 
@@ -222,7 +228,7 @@ class MainActivity : ComponentActivity() {
         return R * c
     }
 
-    private fun updateTrailPoints() {
+    private fun updateTrailPoints(totalSteps: Int) {
         scope.launch {
             try {
                 val SCALE = 0.0001
@@ -449,7 +455,7 @@ class MainActivity : ComponentActivity() {
             Button(
                 onClick = {
                     showMapFlow.value = true
-                    updateTrailPoints()
+                    updateTrailPoints(StepCounterService.currentStepCount.value)
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
             ) {
@@ -759,18 +765,32 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        StepCounterService.activeActivity.value = com.example.phantomtrail.service.ActiveActivity.MAIN
+        isActive = true
+
         scope.launch {
-            try {
-                val stepData = repository.loadStepData()
+            val stepData = repository.loadStepData()
+            withContext(Dispatchers.Main) {
                 StepCounterService.currentStepCount.value = stepData.steps
-                if (showMapFlow.value) updateTrailPoints()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error on resume: ${e.message}")
             }
         }
     }
 
+
+    override fun onPause() {
+        super.onPause()
+        isActive = false
+    }
+    override fun onStop() {
+        super.onStop()
+        if (!isFinishing) {
+            return
+        }
+        StepCounterService.activeActivity.value = com.example.phantomtrail.service.ActiveActivity.NONE
+    }
+
     private fun startTracking() {
+        StepCounterService.isMainRunning.value = true
         val serviceIntent = Intent(this, StepCounterService::class.java).apply {
             action = StepCounterService.ACTION_START
         }
@@ -785,6 +805,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun pauseTracking() {
+        StepCounterService.isMainRunning.value = false
         val serviceIntent = Intent(this, StepCounterService::class.java).apply {
             action = StepCounterService.ACTION_STOP
         }
@@ -873,17 +894,30 @@ class MainActivity : ComponentActivity() {
 
 
     private fun exportGPX() {
-        val options = arrayOf("Share GPX", "Save to Downloads")
+        scope.launch {
+            val stepData = repository.loadStepData()
+            Log.d(TAG, "Export check - saved steps: ${stepData.steps}, service steps: ${StepCounterService.currentStepCount.value}")
 
-        AlertDialog.Builder(this)
-            .setTitle("Export GPX")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> shareGPX()
-                    1 -> saveGPXLocally()
+            val currentSteps = stepData.steps
+
+            withContext(Dispatchers.Main) {
+                if (currentSteps <= 0) {
+                    Toast.makeText(this@MainActivity, "No steps recorded", Toast.LENGTH_SHORT).show()
+                    return@withContext
                 }
+
+                val options = arrayOf("Share GPX", "Save to Downloads")
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Export GPX")
+                    .setItems(options) { _, which ->
+                        when (which) {
+                            0 -> shareGPX()
+                            1 -> saveGPXLocally()
+                        }
+                    }
+                    .show()
             }
-            .show()
+        }
     }
 
     private fun shareGPXFile(file: File) {
@@ -901,13 +935,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun shareGPX() {  // Changed from shareGPXFile
+    private fun shareGPX() {
         scope.launch {
             try {
                 val stepData = repository.loadStepData()
                 val points = repository.loadTrailPoints()
 
-                if (stepData.steps < 2 || stepData.timestamps.size < 2) {
+                Log.d(TAG, "shareGPX - steps: ${stepData.steps}, timestamps: ${stepData.timestamps.size}, points: ${points.size}")
+                Log.d(TAG, "steps: ${stepData.steps}, timestamps: ${stepData.timestamps.size}")
+
+                if (stepData.steps < 2) {
                     withContext(Dispatchers.Main) {
                         Toast.makeText(this@MainActivity, "Not enough steps", Toast.LENGTH_SHORT).show()
                     }
@@ -938,7 +975,18 @@ class MainActivity : ComponentActivity() {
             try {
                 val stepData = repository.loadStepData()
                 val points = repository.loadTrailPoints()
-
+                scope.launch(Dispatchers.Main) {
+                    StepCounterService.currentStepCount.collect { totalSteps ->
+                        if (StepCounterService.activeActivity.value != com.example.phantomtrail.service.ActiveActivity.MAIN) return@collect
+                        scope.launch {
+                            repository.saveSteps(totalSteps)
+                            // Save timestamps from service
+                            val timestamps = StepCounterService.getTimestamps()
+                            repository.saveTimestamps(timestamps)
+                        }
+                        if (totalSteps > 0) updateTrailPoints(totalSteps)
+                    }
+                }
                 if (stepData.steps < 2 || stepData.timestamps.size < 2) {
                     withContext(Dispatchers.Main) {
                         Toast.makeText(this@MainActivity, "Not enough steps", Toast.LENGTH_SHORT).show()
