@@ -21,6 +21,8 @@ class FollowGpxStepRepository(private val context: Context) {
         private val GPX_IMPORTED_KEY = booleanPreferencesKey("gpx_imported")
         private val EXTENDED_TRAIL_KEY = stringPreferencesKey("extended_trail_points")
         private val USER_CONTINUING_KEY = booleanPreferencesKey("user_continuing")
+        private val EXTENDED_START_TRAIL_KEY = stringPreferencesKey("extended_start_trail")
+        private val USER_CONTINUING_FROM_START_KEY = booleanPreferencesKey("user_continuing_from_start")
 
     }
     suspend fun saveExtendedTrail(points: List<GeoPoint>, isContinuing: Boolean) {
@@ -30,6 +32,16 @@ class FollowGpxStepRepository(private val context: Context) {
             prefs[USER_CONTINUING_KEY] = isContinuing
         }
     }
+
+    suspend fun saveExtendedStartTrail(points: List<GeoPoint>, isContinuing: Boolean) {
+        context.followGpxDataStore.edit { prefs ->
+            val trailStr = points.joinToString(";") { "${it.latitude},${it.longitude}" }
+            prefs[EXTENDED_START_TRAIL_KEY] = trailStr
+            prefs[USER_CONTINUING_FROM_START_KEY] = isContinuing
+        }
+    }
+
+
 
     suspend fun loadExtendedTrail(): List<GeoPoint> {
         val prefs = context.followGpxDataStore.data.first()
@@ -44,9 +56,27 @@ class FollowGpxStepRepository(private val context: Context) {
         }
     }
 
+    suspend fun loadExtendedStartTrail(): List<GeoPoint> {
+        val prefs = context.followGpxDataStore.data.first()
+        val trailStr = prefs[EXTENDED_START_TRAIL_KEY] ?: return emptyList()
+        return trailStr.split(";").mapNotNull { pointStr ->
+            val parts = pointStr.split(",")
+            if (parts.size == 2) {
+                try { GeoPoint(parts[0].toDouble(), parts[1].toDouble()) }
+                catch (e: Exception) { null }
+            } else null
+        }
+    }
+
+
     suspend fun wasUserContinuing(): Boolean {
         val prefs = context.followGpxDataStore.data.first()
         return prefs[USER_CONTINUING_KEY] ?: false
+    }
+
+    suspend fun wasUserContinuingFromStart(): Boolean {
+        val prefs = context.followGpxDataStore.data.first()
+        return prefs[USER_CONTINUING_FROM_START_KEY] ?: false
     }
     suspend fun saveImportedTrail(points: List<GeoPoint>) {
         context.followGpxDataStore.edit { prefs ->
