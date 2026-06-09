@@ -56,6 +56,39 @@ class GpxExporter {
     }
 
 
+    /**
+     * Build a (timestamp, GeoPoint) list spread along the trail by step index.
+     * Used for EXIF tagging so photo positions match the GPX export exactly.
+     */
+    fun generateTimedTrackpoints(
+        points: List<GeoPoint>,
+        timestamps: List<ZonedDateTime>,
+        totalSteps: Int
+    ): List<Pair<ZonedDateTime, GeoPoint>> {
+        if (points.isEmpty() || timestamps.isEmpty()) return emptyList()
+
+        val distances = mutableListOf(0.0)
+        for (i in 1 until points.size) {
+            distances.add(distances.last() + GeoUtils.calculateHaversineDistance(
+                points[i - 1].longitude, points[i - 1].latitude,
+                points[i].longitude, points[i].latitude
+            ))
+        }
+        val trailDistance = distances.last()
+
+        if (timestamps.size < 2 || trailDistance < 0.000001 || totalSteps <= 0) {
+            return timestamps.map { it to points.first() }
+        }
+
+        // Spread timestamps evenly from trail start (0%) to current position (100%)
+        // so the first trackpoint is always at the original start point.
+        val lastIndex = (timestamps.size - 1).coerceAtLeast(1)
+        return timestamps.mapIndexed { i, ts ->
+            val progress = (i.toDouble() / lastIndex).coerceIn(0.0, 1.0)
+            ts to interpolateLocation(points, distances, progress * trailDistance)
+        }
+    }
+
     private fun generateTrackpointsWithRealTiming(
         points: List<GeoPoint>,
         timestamps: List<ZonedDateTime>,
@@ -71,6 +104,20 @@ class GpxExporter {
         }
         val trailDistance = distances.last()
 
+        if (timestamps.size < 2 || trailDistance < 0.000001 || totalSteps <= 0) {
+            // Not enough data to spread trackpoints — emit single point at start
+            return createTrackpoint(
+                points.first().latitude,
+                points.first().longitude,
+                timestamps.first().format(DateTimeFormatter.ISO_INSTANT)
+            )
+        }
+
+        // Spread timestamps evenly from the trail start (0%) to current position (100%).
+        // This ensures the GPX always starts at the original start point regardless of how
+        // many sessions the walk took.
+        val lastIndex = (timestamps.size - 1).coerceAtLeast(1)
+
         val trackpoints = StringBuilder()
         val stepsPerTrackpoint = 10
         var lastTime = timestamps.first()
@@ -80,11 +127,15 @@ class GpxExporter {
             val timestampIndex = i.coerceAtMost(timestamps.size - 1)
             val currentTime = timestamps[timestampIndex]
 
-            // Skip if time gap is too large (pause detection)
+            // Skip if time gap is too large (pause detection), but advance lastTime
+            // so subsequent steps after the pause are not also discarded
             val gap = Duration.between(lastTime, currentTime).seconds
-            if (gap > 300) continue
+            if (gap > TIME_GAP_THRESHOLD_SECONDS) {
+                lastTime = currentTime
+                continue
+            }
 
-            val progress = i.toDouble() / (timestamps.size - 1)
+            val progress = (i.toDouble() / lastIndex).coerceIn(0.0, 1.0)
             val targetDistance = progress * trailDistance
             val location = interpolateLocation(points, distances, targetDistance)
 
@@ -154,7 +205,7 @@ class GpxExporter {
  </metadata>
  <trk>
   <name>Phantom Trail</name>
-  <type>1</type>
+  <type>running</type>
   <trkseg>
 $trackpoints </trkseg>
  </trk>

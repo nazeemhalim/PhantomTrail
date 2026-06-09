@@ -18,6 +18,7 @@ import java.text.SimpleDateFormat
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.util.*
+import java.time.Duration
 import kotlin.math.abs
 
 /**
@@ -115,6 +116,51 @@ class PhotoGpsProcessor(
 
         tempFile.delete()
         return resultUri
+    }
+
+    /**
+     * Tag photos using step-derived timed trackpoints (same source as GPX export).
+     * Each photo is matched to the trackpoint whose timestamp is closest to the photo's EXIF time.
+     */
+    suspend fun processPhotos(
+        photoUris: List<Uri>,
+        timedTrackpoints: List<Pair<ZonedDateTime, GeoPoint>>
+    ): ProcessResult {
+        if (timedTrackpoints.isEmpty()) throw IllegalStateException("No trail data available")
+
+        var successCount = 0
+        var errorCount = 0
+        val savedPhotoUris = mutableListOf<Uri>()
+
+        for (uri in photoUris) {
+            try {
+                val tempFile = File(context.cacheDir, "temp_${System.currentTimeMillis()}.jpg")
+                contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(tempFile).use { output -> input.copyTo(output) }
+                }
+                val exif = ExifInterface(tempFile.absolutePath)
+                val photoTime = getPhotoTimestamp(exif, timedTrackpoints.last().first)
+                val location = timedTrackpoints.minByOrNull { (t, _) ->
+                    abs(Duration.between(t, photoTime).seconds)
+                }?.second ?: timedTrackpoints.first().second
+
+                updateGpsCoordinates(exif, location)
+                exif.saveAttributes()
+
+                var overwritten = false
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    overwritten = tryOverwriteOriginal(uri, tempFile)
+                }
+                val resultUri = if (!overwritten) savePhotoToSameDirectory(uri, tempFile) else uri
+                tempFile.delete()
+
+                if (resultUri != null) { savedPhotoUris.add(resultUri); successCount++ } else errorCount++
+            } catch (e: Exception) {
+                Log.e(TAG, "Error processing photo $uri: ${e.message}", e)
+                errorCount++
+            }
+        }
+        return ProcessResult(successCount, errorCount, savedPhotoUris)
     }
 
     suspend fun processPhotosWithFixedLocation(
