@@ -2,7 +2,6 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.google.gms.google-services")
 }
 
 android {
@@ -14,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "1.6.3"
+        versionName = "1.6.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -77,8 +76,6 @@ dependencies {
     // DataStore
     implementation("androidx.datastore:datastore-preferences:1.0.0")
 
-    // GPX library - using older version that's more Android-compatible
-    implementation("io.jenetics:jpx:2.2.0")
     implementation(libs.androidx.compose.foundation.layout)
     implementation(libs.androidx.foundation.layout)
     implementation(libs.androidx.appcompat)
@@ -97,10 +94,6 @@ dependencies {
 
     // EXIF
     implementation("androidx.exifinterface:exifinterface:1.3.7")
-
-    // Google Firebase SDK
-    implementation(platform("com.google.firebase:firebase-bom:34.7.0"))
-    implementation("com.google.firebase:firebase-analytics")
 
     // Testing
     testImplementation("junit:junit:4.13.2")
