@@ -56,15 +56,16 @@ class MainMenuActivity : ComponentActivity() {
                     Spacer(modifier = Modifier.height(16.dp))
 
                     Button(
-                        onClick = { startActivity(Intent(this@MainMenuActivity, FollowRoadActivity::class.java)) },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4A7C59)),
+                        onClick = {
+                            startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.strava.com/upload/select")))
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFC4C02)),
                         modifier = Modifier.width(200.dp)
                     ) {
-                        Text("Follow Road", fontSize = 18.sp,
-                            color = Color.White)
+                        Text("Upload to Strava", fontSize = 18.sp, color = Color.White)
                     }
                     Spacer(modifier = Modifier.height(64.dp))
-                    Text("V1.6.4", color = Color.DarkGray, fontSize = 12.sp)
+                    Text("V1.6.5", color = Color.DarkGray, fontSize = 12.sp)
                 }
             }
         }

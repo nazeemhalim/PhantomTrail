@@ -35,6 +35,7 @@ import com.example.phantomtrail.service.StepCounterService
 import com.example.phantomtrail.ui.theme.PhantomTrailTheme
 import com.example.phantomtrail.utils.GpxExporter
 import com.example.phantomtrail.utils.PhotoGpsProcessor
+import com.example.phantomtrail.utils.RandomRoadGenerator
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.osmdroid.config.Configuration
@@ -62,6 +63,8 @@ class FollowGpxActivity : ComponentActivity() {
     private var baselineSet = false
     private var isActive = false
     private var accumulatedExtendedDistance = 0.0
+    private val roadGenerator = RandomRoadGenerator()
+    private var roadFetchInProgress = false
     private lateinit var followGpxRepository: FollowGpxStepRepository
     private lateinit var gpxExporter: GpxExporter
 
@@ -128,6 +131,11 @@ class FollowGpxActivity : ComponentActivity() {
         private val isReversingFromStartExtended = MutableStateFlow(false)
         private var startExtendedReverseStartSteps = 0
         val startExtendedReverseMarker = MutableStateFlow<GeoPoint?>(null)
+
+        // Road-following extension state
+        val continueAsRoad = MutableStateFlow(false)
+        private val fullRoadPath = MutableStateFlow<List<GeoPoint>>(emptyList())
+        private var roadPathConsumedIdx = 0
     }
 
     private val pickGpxFile = registerForActivityResult(
@@ -169,17 +177,22 @@ class FollowGpxActivity : ComponentActivity() {
             val wasContinuing = followGpxRepository.wasUserContinuing()
             val savedExtendedStart = followGpxRepository.loadExtendedStartTrail()
             val wasContinuingFromStart = followGpxRepository.wasUserContinuingFromStart()
+            val wasRoad = followGpxRepository.wasContinueAsRoad()
 
             withContext(Dispatchers.Main) {
                 if (savedTrail.isNotEmpty() && wasImported) {
                     importedTrailPoints.value = savedTrail
                     gpxImported.value = true
                 }
+                continueAsRoad.value = wasRoad
                 if (savedExtended.isNotEmpty() && wasContinuing) {
                     extendedTrailPoints.value = savedExtended
                     userChoseToContinue.value = true
                     reachedEnd.value = true
                     lastGeneratedSteps = stepData.steps
+                    // The drip-feed road path is regenerated on demand from the last point
+                    roadPathConsumedIdx = 0
+                    fullRoadPath.value = emptyList()
                 }
                 if (savedExtendedStart.isNotEmpty() && wasContinuingFromStart) {
                     extendedStartTrailPoints.value = savedExtendedStart
@@ -549,18 +562,23 @@ class FollowGpxActivity : ComponentActivity() {
                     currentPosition.value = points.size - 1
                 }
                 else -> {
-                    // Auto-continue in random direction — no dialog needed
+                    // Auto-continue past the end using the type chosen up-front (trail vs road).
+                    // For road mode the path was already validated + pre-fetched at choose time,
+                    // so there's no dialog or network check here.
                     userChoseToContinue.value = true
-                    extendedTrailPoints.value = listOf(importedTrailPoints.value.last())
+                    reachedEnd.value = true
+                    val startPt = importedTrailPoints.value.last()
+                    extendedTrailPoints.value = listOf(startPt)
                     lastGeneratedSteps = totalSteps
-                    continueAngle = 0.0
                     accumulatedExtendedDistance = 0.0
+                    if (!continueAsRoad.value) continueAngle = 0.0
                 }
             }
         }
     }
 
     private fun generateExtendedTrail(totalSteps: Int) {
+        if (continueAsRoad.value) { generateRoadExtension(totalSteps); return }
         scope.launch {
             val SCALE = 0.0001
             val angleVariability = Math.PI / 7
@@ -606,6 +624,141 @@ class FollowGpxActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /** Drip-feeds pre-generated road points into extendedTrailPoints as the user walks. */
+    private fun generateRoadExtension(totalSteps: Int) {
+        val path = fullRoadPath.value
+        // No path yet (first time, fully consumed, or restored from disk) — fetch a fresh
+        // segment starting at the current end of the walk, then resume next tick.
+        if (path.isEmpty() || roadPathConsumedIdx >= path.size) {
+            val from = extendedTrailPoints.value.lastOrNull()
+                ?: importedTrailPoints.value.lastOrNull()
+            if (from != null) beginRoadFetch(from)
+            lastGeneratedSteps = totalSteps
+            return
+        }
+
+        val newSteps = totalSteps - lastGeneratedSteps
+        if (newSteps <= 0) return
+
+        val newDistance = newSteps * stepLengthMeters.value
+        accumulatedExtendedDistance += newDistance
+
+        val newPointsToAdd = (accumulatedExtendedDistance / RandomRoadGenerator.METERS_PER_POINT).toInt()
+        if (newPointsToAdd > 0) {
+            val ext = extendedTrailPoints.value.toMutableList()
+            val endIdx = (roadPathConsumedIdx + newPointsToAdd).coerceAtMost(path.size)
+            ext.addAll(path.subList(roadPathConsumedIdx, endIdx))
+            roadPathConsumedIdx = endIdx
+            accumulatedExtendedDistance -= newPointsToAdd * RandomRoadGenerator.METERS_PER_POINT
+            lastGeneratedSteps = totalSteps
+
+            // Path exhausted — queue a fresh segment from this new end point
+            if (roadPathConsumedIdx >= path.size) {
+                fullRoadPath.value = emptyList()
+                roadPathConsumedIdx = 0
+            }
+
+            extendedTrailPoints.value = ext
+            scope.launch { followGpxRepository.saveExtendedTrail(ext, true) }
+        } else {
+            lastGeneratedSteps = totalSteps
+        }
+    }
+
+    /**
+     * Mid-walk continuation fetch (path consumed or restored from disk). Falls back quietly to the
+     * random trail if no road is reachable — the road availability dialog only ever appears
+     * up-front at choose time, never during the walk.
+     */
+    private fun beginRoadFetch(from: GeoPoint) {
+        if (roadFetchInProgress) return
+        roadFetchInProgress = true
+        scope.launch {
+            val path = roadGenerator.generateRoadPath(from)
+            withContext(Dispatchers.Main) {
+                roadFetchInProgress = false
+                if (path.isNotEmpty()) {
+                    fullRoadPath.value = path
+                    roadPathConsumedIdx = 0
+                } else {
+                    continueAsRoad.value = false
+                    continueAngle = 0.0
+                    scope.launch { followGpxRepository.saveContinueAsRoad(false) }
+                    Toast.makeText(this@FollowGpxActivity,
+                        "No roads found nearby, using random trail", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    /** Validates road availability at choose time, then starts tracking in road mode. */
+    private fun tryStartRoadMode() {
+        val startPt = importedTrailPoints.value.lastOrNull() ?: run { startService(); return }
+        Toast.makeText(this, "Checking for roads nearby…", Toast.LENGTH_SHORT).show()
+        roadFetchInProgress = true
+        scope.launch {
+            val path = roadGenerator.generateRoadPath(startPt)
+            withContext(Dispatchers.Main) {
+                roadFetchInProgress = false
+                if (path.isNotEmpty()) {
+                    fullRoadPath.value = path
+                    roadPathConsumedIdx = 0
+                    continueAsRoad.value = true
+                    isReversing.value = false
+                    scope.launch { followGpxRepository.saveContinueAsRoad(true) }
+                    startService()
+                } else {
+                    showNoRoadsDialog()
+                }
+            }
+        }
+    }
+
+    /** Shown at choose time when no road is reachable within the search radius. */
+    private fun showNoRoadsDialog() {
+        val options = arrayOf("Continue Random Trail", "Cancel")
+        var selected = 0
+        AlertDialog.Builder(this)
+            .setTitle("No road within reach")
+            .setSingleChoiceItems(options, selected) { _, which -> selected = which }
+            .setPositiveButton("OK") { _, _ ->
+                when (options[selected]) {
+                    "Continue Random Trail" -> {
+                        continueAsRoad.value = false
+                        continueAngle = 0.0
+                        isReversing.value = false
+                        scope.launch { followGpxRepository.saveContinueAsRoad(false) }
+                        startService()
+                    }
+                    "Cancel" -> showModeDialog()
+                }
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    /** Sub-dialog from "Continue": choose how the walk extends once the imported trail ends. */
+    private fun showContinueModeDialog() {
+        val options = arrayOf("Continue Random Trail", "Continue Random Road")
+        var selected = if (continueAsRoad.value) 1 else 0
+        AlertDialog.Builder(this)
+            .setTitle("When the trail ends, continue as…")
+            .setSingleChoiceItems(options, selected) { _, which -> selected = which }
+            .setPositiveButton("OK") { _, _ ->
+                if (selected == 1) {
+                    // Validate roads now, up-front — may branch to the no-roads dialog
+                    tryStartRoadMode()
+                } else {
+                    continueAsRoad.value = false
+                    isReversing.value = false
+                    scope.launch { followGpxRepository.saveContinueAsRoad(false) }
+                    startService()
+                }
+            }
+            .setNegativeButton("Back") { _, _ -> showModeDialog() }
+            .show()
     }
 
     private fun generateExtendedTrailFromStart(totalSteps: Int) {
@@ -1093,7 +1246,7 @@ class FollowGpxActivity : ComponentActivity() {
         allPoints: List<GeoPoint>,
         fromIdx: Int = 0,
         toIdx: Int = allPoints.size - 1,
-        maxMeters: Double = 4.0
+        maxMeters: Double = 1.0
     ): List<GeoPoint> {
         if (allPoints.size < 2) return allPoints.subList(fromIdx, (toIdx + 1).coerceAtMost(allPoints.size))
         val seed = (allPoints.first().latitude * 1e8 + allPoints.first().longitude * 1e8).toLong()
@@ -1216,6 +1369,9 @@ class FollowGpxActivity : ComponentActivity() {
         continueAngle = 0.0
         lastStartExtendedSteps = 0
         startExtendedAngle = 0.0
+        continueAsRoad.value = false
+        fullRoadPath.value = emptyList()
+        roadPathConsumedIdx = 0
 
         scope.launch {
             followGpxRepository.saveSteps(0)
@@ -1242,8 +1398,14 @@ class FollowGpxActivity : ComponentActivity() {
             .setPositiveButton("OK") { dialog, _ ->
                 when (options[selected]) {
                     "Continue" -> {
-                        isReversing.value = false
-                        startService()
+                        if (userChoseToContinue.value || userChoseToContinueFromStart.value) {
+                            // Already walking an extension — just resume it
+                            isReversing.value = false
+                            startService()
+                        } else {
+                            // Choose how the walk extends once the trail ends
+                            showContinueModeDialog()
+                        }
                     }
                     "Reverse" -> {
                         when {

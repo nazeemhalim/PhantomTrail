@@ -23,7 +23,19 @@ class FollowGpxStepRepository(private val context: Context) {
         private val USER_CONTINUING_KEY = booleanPreferencesKey("user_continuing")
         private val EXTENDED_START_TRAIL_KEY = stringPreferencesKey("extended_start_trail")
         private val USER_CONTINUING_FROM_START_KEY = booleanPreferencesKey("user_continuing_from_start")
+        private val CONTINUE_AS_ROAD_KEY = booleanPreferencesKey("continue_as_road")
 
+    }
+
+    suspend fun saveContinueAsRoad(asRoad: Boolean) {
+        context.followGpxDataStore.edit { prefs ->
+            prefs[CONTINUE_AS_ROAD_KEY] = asRoad
+        }
+    }
+
+    suspend fun wasContinueAsRoad(): Boolean {
+        val prefs = context.followGpxDataStore.data.first()
+        return prefs[CONTINUE_AS_ROAD_KEY] ?: false
     }
     suspend fun saveExtendedTrail(points: List<GeoPoint>, isContinuing: Boolean) {
         context.followGpxDataStore.edit { prefs ->
