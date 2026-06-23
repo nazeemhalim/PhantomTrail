@@ -49,6 +49,10 @@
             android:name=".FollowGpxActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".FollowRandomRoad"
+            android:exported="false" />
+
         <service
             android:name=".service.StepCounterService"
             android:enabled="true"

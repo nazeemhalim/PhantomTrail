@@ -14,8 +14,10 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.phantomtrail.FollowGpxActivity
+import com.example.phantomtrail.FollowRandomRoad
 import com.example.phantomtrail.MainActivity
 import com.example.phantomtrail.data.FollowGpxStepRepository
+import com.example.phantomtrail.data.RoadStepRepository
 import com.example.phantomtrail.data.StepRepository
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,7 +27,7 @@ import java.time.ZonedDateTime
  * Foreground service step counting
  */
 
-enum class ActiveActivity { NONE, MAIN, FOLLOW_GPX }
+enum class ActiveActivity { NONE, MAIN, FOLLOW_GPX, FOLLOW_ROAD }
 
 class StepCounterService : Service(), SensorEventListener {
 
@@ -77,16 +79,33 @@ class StepCounterService : Service(), SensorEventListener {
 
         scope.launch {
             try {
-                val initialSteps = when (activeActivity.value) {
-                    ActiveActivity.FOLLOW_GPX -> 0
+                // Seed with the saved timestamps so the recorded timeline survives service
+                // restarts (pause/resume, loop laps). Without this, each restart began with an
+                // empty timestamp list and the activity overwrote storage with only the
+                // post-restart slice — collapsing the exported duration.
+                val initialSteps: Int
+                val initialTimestamps: List<ZonedDateTime>
+                when (activeActivity.value) {
+                    ActiveActivity.FOLLOW_GPX -> {
+                        initialSteps = 0
+                        initialTimestamps = FollowGpxStepRepository(this@StepCounterService)
+                            .loadStepData().timestamps
+                    }
+                    ActiveActivity.FOLLOW_ROAD -> {
+                        initialSteps = 0
+                        initialTimestamps = RoadStepRepository(this@StepCounterService)
+                            .loadStepData().timestamps
+                    }
                     else -> {
-                        repository.loadStepData().steps
+                        val stepData = repository.loadStepData()
+                        initialSteps = stepData.steps
+                        initialTimestamps = stepData.timestamps
                     }
                 }
-                stepCountingManager.initialize(initialSteps, emptyList())
+                stepCountingManager.initialize(initialSteps, initialTimestamps)
                 currentStepCount.value = stepCountingManager.getCurrentSteps()
                 isInitialized = true
-                Log.d(TAG, "Service initialized with $initialSteps steps")
+                Log.d(TAG, "Service initialized with $initialSteps steps, ${initialTimestamps.size} timestamps")
             } catch (e: Exception) {
                 Log.e(TAG, "Error initializing: ${e.message}", e)
             }
@@ -282,6 +301,7 @@ class StepCounterService : Service(), SensorEventListener {
     private fun createNotification(): Notification {
         val notificationIntent = when (activeActivity.value) {
             ActiveActivity.FOLLOW_GPX -> Intent(this, FollowGpxActivity::class.java)
+            ActiveActivity.FOLLOW_ROAD -> Intent(this, FollowRandomRoad::class.java)
             else -> Intent(this, MainActivity::class.java)
         }
         val pendingIntent = PendingIntent.getActivity(
@@ -300,6 +320,7 @@ class StepCounterService : Service(), SensorEventListener {
         // Show correct steps based on active activity
         val displaySteps = when (activeActivity.value) {
             ActiveActivity.FOLLOW_GPX -> FollowGpxActivity.followGpxSteps.value
+            ActiveActivity.FOLLOW_ROAD -> FollowRandomRoad.roadSteps.value
             else -> currentStepCount.value
         }
 

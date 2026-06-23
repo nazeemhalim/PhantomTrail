@@ -18,12 +18,20 @@ class StepCountingManager(
     companion object {
         private const val TAG = "StepCountingManager"
         private const val SENSOR_RESET_THRESHOLD = 300 // 5 minutes in seconds
+        // Minimum spacing between consecutive step timestamps. The sensor can deliver steps in
+        // rapid bursts (FASTEST delay / batched delivery / injected steps), stamping hundreds of
+        // steps within milliseconds and collapsing the exported pace. Capping the cadence here
+        // keeps the recorded timeline realistic: slower real walking keeps its real timing, while
+        // bursts are spread out to a target pace.
+        // 270 ms ≈ 0.75 m × (1000/270) ≈ 2.78 m/s ≈ 6:00/km (jog), matching a typical run export.
+        private const val MIN_STEP_INTERVAL_MS = 270L
     }
 
     private var initialStepCount = -1
     private var currentSteps = 0
     private var isInitialized = false
     private val stepTimestamps = mutableListOf<ZonedDateTime>()
+    private var lastStepTimestamp: ZonedDateTime? = null
 
     private var lastSaveTime = 0L
     private val SAVE_INTERVAL_MS = 5000L // Save every 5 seconds max
@@ -34,6 +42,7 @@ class StepCountingManager(
             initialStepCount = -1
             stepTimestamps.clear()
             stepTimestamps.addAll(initialTimestamps)
+            lastStepTimestamp = initialTimestamps.lastOrNull()
             isInitialized = true
 
             Log.d(TAG, "Initialized with $currentSteps steps, ${stepTimestamps.size} timestamps")
@@ -46,8 +55,27 @@ class StepCountingManager(
         currentSteps = 0
         initialStepCount = -1
         stepTimestamps.clear()
+        lastStepTimestamp = null
         lastSaveTime = 0L
         Log.d(TAG, "StepCountingManager reset to 0")
+    }
+
+    /**
+     * Returns the timestamp to record for the next step: real wall-clock time, but never closer
+     * than [MIN_STEP_INTERVAL_MS] to the previous step so bursts of steps spread to a realistic
+     * cadence instead of collapsing onto the same instant.
+     */
+    private fun nextStepTimestamp(): ZonedDateTime {
+        val now = ZonedDateTime.now()
+        val prev = lastStepTimestamp
+        val ts = if (prev == null) {
+            now
+        } else {
+            val earliest = prev.plusNanos(MIN_STEP_INTERVAL_MS * 1_000_000)
+            if (now.isAfter(earliest)) now else earliest
+        }
+        lastStepTimestamp = ts
+        return ts
     }
 
     fun onSensorChanged(event: SensorEvent) {
@@ -85,11 +113,10 @@ class StepCountingManager(
 
             val newStepCount = totalSteps - initialStepCount
 
-            // Add timestamps for new steps
+            // Add timestamps for new steps, spread at a realistic cadence
             while (currentSteps < newStepCount) {
-                stepTimestamps.add(ZonedDateTime.now())
+                stepTimestamps.add(nextStepTimestamp())
                 currentSteps++
-                Log.d(TAG, "Step incremented to: $currentSteps")
             }
 
             saveThrottled()
@@ -101,9 +128,8 @@ class StepCountingManager(
 
     private fun handleStepDetector() {
         try {
-            stepTimestamps.add(ZonedDateTime.now())
+            stepTimestamps.add(nextStepTimestamp())
             currentSteps++
-            Log.d(TAG, "Step detector - incremented to: $currentSteps")
             saveThrottled()
             onStepUpdate()
         } catch (e: Exception) {

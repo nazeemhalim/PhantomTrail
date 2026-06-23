@@ -115,6 +115,9 @@ class FollowGpxActivity : ComponentActivity() {
         private val isReversingFromExtended = MutableStateFlow(false) // reversing through off-trail extension
         private var extendedReverseStartSteps = 0
         private var segmentBaselineSteps = 0
+        private var trailResetIndex = 0
+        val trailResetIndexState = MutableStateFlow(0)
+        private var exportStartIndex = 0  // preserved across loop laps; trailResetIndex clears to 0 after first lap
         private var completedLaps = 0
         val extendedStartTrailPoints = MutableStateFlow<List<GeoPoint>>(emptyList())
         private val userChoseToContinueFromStart = MutableStateFlow(false)
@@ -344,6 +347,8 @@ class FollowGpxActivity : ComponentActivity() {
                     isReversing.value = false
                     reverseStartSteps.value = 0
                     segmentBaselineSteps = 0
+                    trailResetIndex = 0; trailResetIndexState.value = 0
+                    exportStartIndex = 0
                     extendedStartTrailPoints.value = emptyList()
                     userChoseToContinueFromStart.value = false
                     lastStartExtendedSteps = 0
@@ -530,12 +535,12 @@ class FollowGpxActivity : ComponentActivity() {
             return
         }
 
-        // Normal forward movement
+        // Normal forward movement — starts from trailResetIndex (non-zero after "Reset from current")
         val effectiveSteps = totalSteps - segmentBaselineSteps
         val walkedDistance = effectiveSteps * stepLengthMeters.value / 1000.0
 
         var accumulatedDistance = 0.0
-        for (i in 1 until points.size) {
+        for (i in (trailResetIndex + 1) until points.size) {
             val segmentDist = calculateDistance(points[i-1], points[i])
             if (accumulatedDistance + segmentDist >= walkedDistance) {
                 currentPosition.value = i
@@ -546,12 +551,16 @@ class FollowGpxActivity : ComponentActivity() {
 
         currentPosition.value = points.size - 1
 
+        var remainingDistance = 0.0
+        for (i in (trailResetIndex + 1) until points.size) remainingDistance += calculateDistance(points[i-1], points[i])
+
         if (!reachedEnd.value && !userChoseToContinue.value && !isReversing.value
-            && !userChoseToContinueFromStart.value && walkedDistance >= totalDistance) {
+            && !userChoseToContinueFromStart.value && walkedDistance >= remainingDistance) {
             when {
                 isLoopTrail.value -> {
                     completedLaps++
                     segmentBaselineSteps = totalSteps
+                    trailResetIndex = 0; trailResetIndexState.value = 0
                     currentPosition.value = 0
                 }
                 pendingReverse.value -> {
@@ -913,12 +922,14 @@ class FollowGpxActivity : ComponentActivity() {
         val isContinuing by userChoseToContinue.collectAsState()
         val isContinuingFromStart by userChoseToContinueFromStart.collectAsState()
         val loopTrail by isLoopTrail.collectAsState()
+        val resetIdx by trailResetIndexState.collectAsState()
 
-        val combinedPoints = remember(points, extendedPoints, extendedStartPoints, isContinuing, isContinuingFromStart) {
+        val combinedPoints = remember(points, extendedPoints, extendedStartPoints, isContinuing, isContinuingFromStart, resetIdx) {
+            val base = if (resetIdx > 0 && resetIdx < points.size) points.subList(resetIdx, points.size) else points
             when {
-                isContinuingFromStart -> points + extendedStartPoints
-                isContinuing -> points + extendedPoints
-                else -> points
+                isContinuingFromStart -> base + extendedStartPoints
+                isContinuing -> base + extendedPoints
+                else -> base
             }
         }
 
@@ -1074,14 +1085,16 @@ class FollowGpxActivity : ComponentActivity() {
         val extRevMarker by extendedReverseMarker.collectAsState()
         val isRevStartExt by isReversingFromStartExtended.collectAsState()
         val startExtRevMarker by startExtendedReverseMarker.collectAsState()
+        val resetIdx by trailResetIndexState.collectAsState()
 
-        // Combine imported + extended for full trail
-        // Build full combined trail based on current state
-        val combinedPoints = remember(points, extendedPoints, extendedStartPoints, isContinuing, isContinuingFromStart) {
+        // Combined trail for the photo slider — starts from trailResetIndex so 0-to-reset
+        // portion is excluded from the picker, matching what gets exported.
+        val combinedPoints = remember(points, extendedPoints, extendedStartPoints, isContinuing, isContinuingFromStart, resetIdx) {
+            val base = if (resetIdx > 0 && resetIdx < points.size) points.subList(resetIdx, points.size) else points
             when {
-                isContinuingFromStart -> points + extendedStartPoints
-                isContinuing -> points + extendedPoints
-                else -> points
+                isContinuingFromStart -> base + extendedStartPoints
+                isContinuing -> base + extendedPoints
+                else -> base
             }
         }
 
@@ -1093,7 +1106,7 @@ class FollowGpxActivity : ComponentActivity() {
             }
         }
 
-        LaunchedEffect(points.size, position, gpxSteps, extendedPoints.size, extendedStartPoints.size, sliderPosition, photosNeedingLocation.isNotEmpty(), loopTrail, isRevExt, extRevMarker, isReversing, isRevStartExt, startExtRevMarker) {
+        LaunchedEffect(points.size, position, gpxSteps, extendedPoints.size, extendedStartPoints.size, sliderPosition, photosNeedingLocation.isNotEmpty(), loopTrail, isRevExt, extRevMarker, isReversing, isRevStartExt, startExtRevMarker, resetIdx) {
             mapView.overlays.clear()
 
             if (points.isNotEmpty()) {
@@ -1107,14 +1120,14 @@ class FollowGpxActivity : ComponentActivity() {
                 }
                 mapView.overlays.add(polyline)
 
-                // Draw walked portion on top in a distinct colour
+                // Draw walked portion on top in a distinct colour (starts from trailResetIndex)
                 val walkedEndPos = when {
                     isReversing || isContinuingFromStart || isRevExt || isRevStartExt -> points.size - 1
                     else -> safePos
                 }
-                if (walkedEndPos > 0 && points.size > 1) {
+                if (walkedEndPos > resetIdx && points.size > 1) {
                     val walkedPolyline = Polyline().apply {
-                        setPoints(deviateTrailPoints(points, 0, walkedEndPos))
+                        setPoints(deviateTrailPoints(points, resetIdx, walkedEndPos))
                         outlinePaint.color = AndroidColor.rgb(100, 60, 180) // purple — traversed
                         outlinePaint.strokeWidth = 12f
                     }
@@ -1332,19 +1345,19 @@ class FollowGpxActivity : ComponentActivity() {
         }
 
         if (resetPosition) {
+            trailResetIndex = 0; trailResetIndexState.value = 0
+            exportStartIndex = 0
             followGpxSteps.value = 0
             currentPosition.value = 0
             segmentBaselineSteps = 0
         } else {
-            // Preserve position by offsetting baseline so effectiveSteps at 0 still maps to current pos
             val pts = importedTrailPoints.value
             val pos = currentPosition.value.coerceIn(0, pts.size - 1)
-            var distToPos = 0.0
-            for (i in 1..pos) distToPos += calculateDistance(pts[i - 1], pts[i])
-            val stepsToPos = (distToPos * 1000.0 / stepLengthMeters.value).toInt()
+            trailResetIndex = pos; trailResetIndexState.value = pos
+            exportStartIndex = pos
             followGpxSteps.value = 0
-            segmentBaselineSteps = -stepsToPos
             currentPosition.value = pos
+            segmentBaselineSteps = 0
         }
 
         reachedEnd.value = false
@@ -1376,6 +1389,9 @@ class FollowGpxActivity : ComponentActivity() {
         scope.launch {
             followGpxRepository.saveSteps(0)
             followGpxRepository.saveExtendedTrail(emptyList(), false)
+            // Clear timing history so the reset session starts a fresh, accurate clock
+            // (the service now re-seeds timestamps on restart).
+            followGpxRepository.saveTimestamps(emptyList())
         }
     }
 
@@ -1497,6 +1513,8 @@ class FollowGpxActivity : ComponentActivity() {
         isReversing.value = false
         reverseStartSteps.value = 0
         segmentBaselineSteps = 0
+        trailResetIndex = 0; trailResetIndexState.value = 0
+        exportStartIndex = 0
         extendedStartTrailPoints.value = emptyList()
         userChoseToContinueFromStart.value = false
         lastStartExtendedSteps = 0
@@ -1554,10 +1572,11 @@ class FollowGpxActivity : ComponentActivity() {
 
         val reversing = isReversing.value
 
-        // Derive position from steps so export is correct even if currentPosition is stale
-        fun indexForDistance(walkedDist: Double): Int {
+        // Derive position from steps so export is correct even if currentPosition is stale.
+        // startIdx lets loop/reset-from-current begin accumulation from the reset point.
+        fun indexForDistance(walkedDist: Double, startIdx: Int = 0): Int {
             var acc = 0.0
-            for (i in 1 until imported.size) {
+            for (i in (startIdx + 1) until imported.size) {
                 acc += calculateDistance(imported[i - 1], imported[i])
                 if (acc >= walkedDist) return i
             }
@@ -1619,7 +1638,7 @@ class FollowGpxActivity : ComponentActivity() {
         // Continue-past-end mode (also used while reversing through the extended trail)
         if (userChoseToContinue.value || isReversingFromExtended.value) {
             val result = mutableListOf<GeoPoint>()
-            result.addAll(imported)
+            result.addAll(imported.subList(trailResetIndex, imported.size))
             val ext = extendedTrailPoints.value
             if (ext.isNotEmpty()) {
                 result.addAll(ext.drop(1)) // forward random extension
@@ -1649,17 +1668,30 @@ class FollowGpxActivity : ComponentActivity() {
         }
 
         // Loop mode
+        // exportStartIndex is the reset position and never changes across laps.
+        // trailResetIndex clears to 0 after the first lap so subsequent laps use the full trail.
+        // First lap: exportStartIndex→end. Subsequent laps: 0→end (full trail).
         if (isLoopTrail.value) {
             val effectiveSteps = (followGpxSteps.value - segmentBaselineSteps).coerceAtLeast(0)
             val walkedDist = effectiveSteps * stepLengthMeters.value / 1000.0
-            val pos = indexForDistance(walkedDist)
             val result = mutableListOf<GeoPoint>()
-            repeat(completedLaps) { result.addAll(imported) }
-            if (reversing) {
-                result.addAll(imported)
-                if (pos < imported.size - 1) result.addAll(imported.subList(pos, imported.size - 1).reversed())
+            if (completedLaps == 0) {
+                // Still in the first (partial) lap — start from the reset position
+                val pos = indexForDistance(walkedDist, exportStartIndex)
+                result.addAll(imported.subList(exportStartIndex, pos + 1))
             } else {
-                result.addAll(imported.subList(0, pos + 1))
+                // First partial lap: exportStartIndex → end
+                result.addAll(imported.subList(exportStartIndex, imported.size))
+                // Subsequent completed full laps
+                repeat(completedLaps - 1) { result.addAll(imported) }
+                // Current lap progress (full lap, trailResetIndex is now 0)
+                val pos = indexForDistance(walkedDist, 0)
+                if (reversing) {
+                    result.addAll(imported)
+                    if (pos < imported.size - 1) result.addAll(imported.subList(pos, imported.size - 1).reversed())
+                } else {
+                    result.addAll(imported.subList(0, pos + 1))
+                }
             }
             return result
         }
@@ -1689,11 +1721,11 @@ class FollowGpxActivity : ComponentActivity() {
             return result
         }
 
-        // Normal forward walk
+        // Normal forward walk — start from trailResetIndex so export excludes pre-reset trail
         val effectiveSteps = (followGpxSteps.value - segmentBaselineSteps).coerceAtLeast(0)
         val walkedDist = effectiveSteps * stepLengthMeters.value / 1000.0
-        val pos = indexForDistance(walkedDist)
-        return imported.subList(0, pos + 1)
+        val pos = indexForDistance(walkedDist, trailResetIndex)
+        return imported.subList(trailResetIndex, pos + 1)
     }
 
     private fun exportGPX() {
@@ -1916,10 +1948,13 @@ class FollowGpxActivity : ComponentActivity() {
                 val isContinuingFromStart = userChoseToContinueFromStart.value
                 val isContinuing = userChoseToContinue.value
 
+                val resetIdx = trailResetIndex
+                val base = if (resetIdx > 0 && resetIdx < importedPoints.size)
+                    importedPoints.subList(resetIdx, importedPoints.size) else importedPoints
                 val combinedPoints = when {
-                    isContinuingFromStart -> importedPoints + extendedStartPoints
-                    isContinuing -> importedPoints + extendedPoints
-                    else -> importedPoints
+                    isContinuingFromStart -> base + extendedStartPoints
+                    isContinuing -> base + extendedPoints
+                    else -> base
                 }
 
                 val trackpointIndex = selectedTrackpointIndex.value.coerceIn(0, combinedPoints.size - 1)
