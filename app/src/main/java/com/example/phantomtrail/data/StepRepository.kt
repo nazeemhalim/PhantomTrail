@@ -29,6 +29,11 @@ class StepRepository(private val context: Context) {
         private val TRAIL_POINTS_KEY = stringPreferencesKey("trail_points")
         private val CUSTOM_START_LAT_KEY = doublePreferencesKey("custom_start_lat")
         private val CUSTOM_START_LON_KEY = doublePreferencesKey("custom_start_lon")
+        private val PREV_TRAILS_KEY = stringPreferencesKey("prev_trails")
+        private const val MAX_PREV_TRAILS = 5
+        private const val TRAIL_SEP = "¶"
+        private const val FIELD_SEP = "§"
+        private const val TS_SEP = "|"
     }
 
     // Flow-based data access
@@ -123,6 +128,45 @@ class StepRepository(private val context: Context) {
             prefs[INITIAL_SENSOR_COUNT_KEY] = -1
             prefs[TIMESTAMPS_KEY] = ""
             prefs[SESSION_START_KEY] = ZonedDateTime.now().toString()
+        }
+    }
+
+    suspend fun loadPreviousTrails(): List<PreviousTrail> {
+        val raw = context.dataStore.data.first()[PREV_TRAILS_KEY] ?: return emptyList()
+        if (raw.isBlank()) return emptyList()
+        return raw.split(TRAIL_SEP).mapNotNull { entry ->
+            try {
+                val parts = entry.split(FIELD_SEP)
+                if (parts.size != 4) return@mapNotNull null
+                val savedAt = ZonedDateTime.parse(parts[0], DateTimeFormatter.ISO_ZONED_DATE_TIME)
+                val steps = parts[1].toInt()
+                val points = parts[2].split(";").mapNotNull { pt ->
+                    val c = pt.split(",")
+                    if (c.size == 2) try { GeoPoint(c[0].toDouble(), c[1].toDouble()) } catch (e: Exception) { null } else null
+                }
+                val timestamps = if (parts[3].isBlank()) emptyList()
+                    else parts[3].split(TS_SEP).mapNotNull { ts ->
+                        try { ZonedDateTime.parse(ts, DateTimeFormatter.ISO_ZONED_DATE_TIME) } catch (e: Exception) { null }
+                    }
+                if (points.isEmpty()) null else PreviousTrail(savedAt, steps, points, timestamps)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse previous trail: ${e.message}")
+                null
+            }
+        }
+    }
+
+    suspend fun appendToPreviousTrails(trail: PreviousTrail) {
+        if (trail.trailPoints.size < 2) return
+        val current = loadPreviousTrails().toMutableList()
+        current.add(0, trail)
+        if (current.size > MAX_PREV_TRAILS) current.subList(MAX_PREV_TRAILS, current.size).clear()
+        context.dataStore.edit { prefs ->
+            prefs[PREV_TRAILS_KEY] = current.joinToString(TRAIL_SEP) { t ->
+                val pts = t.trailPoints.joinToString(";") { "${it.latitude},${it.longitude}" }
+                val ts = t.stepTimestamps.joinToString(TS_SEP) { it.format(DateTimeFormatter.ISO_ZONED_DATE_TIME) }
+                "${t.savedAt.format(DateTimeFormatter.ISO_ZONED_DATE_TIME)}${FIELD_SEP}${t.steps}${FIELD_SEP}${pts}${FIELD_SEP}${ts}"
+            }
         }
     }
 

@@ -87,14 +87,14 @@ class StepCounterService : Service(), SensorEventListener {
                 val initialTimestamps: List<ZonedDateTime>
                 when (activeActivity.value) {
                     ActiveActivity.FOLLOW_GPX -> {
-                        initialSteps = 0
-                        initialTimestamps = FollowGpxStepRepository(this@StepCounterService)
-                            .loadStepData().timestamps
+                        val saved = FollowGpxStepRepository(this@StepCounterService).loadStepData()
+                        initialSteps = saved.steps
+                        initialTimestamps = saved.timestamps
                     }
                     ActiveActivity.FOLLOW_ROAD -> {
-                        initialSteps = 0
-                        initialTimestamps = RoadStepRepository(this@StepCounterService)
-                            .loadStepData().timestamps
+                        val saved = RoadStepRepository(this@StepCounterService).loadStepData()
+                        initialSteps = saved.steps
+                        initialTimestamps = saved.timestamps
                     }
                     else -> {
                         val stepData = repository.loadStepData()

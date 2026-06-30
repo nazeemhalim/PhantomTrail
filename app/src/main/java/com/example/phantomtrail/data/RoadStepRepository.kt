@@ -22,6 +22,12 @@ class RoadStepRepository(private val context: Context) {
         private val ROAD_PATH_KEY = stringPreferencesKey("road_path")
         private val START_LAT_KEY = doublePreferencesKey("start_lat")
         private val START_LON_KEY = doublePreferencesKey("start_lon")
+        private val PREV_TRAILS_KEY = stringPreferencesKey("prev_trails")
+        private const val MAX_PREV_TRAILS = 5
+        // Delimiters chosen to be safe against coordinate/ISO-date characters
+        private const val TRAIL_SEP = "¶"   // between trails
+        private const val FIELD_SEP = "§"   // between fields inside one trail
+        private const val TS_SEP = "|"       // between timestamps inside one trail
     }
 
     suspend fun loadStepData(): RoadStepData {
@@ -85,6 +91,42 @@ class RoadStepRepository(private val context: Context) {
         }
     }
 
+    suspend fun loadPreviousTrails(): List<PreviousTrail> {
+        val raw = context.roadDataStore.data.first()[PREV_TRAILS_KEY] ?: return emptyList()
+        if (raw.isBlank()) return emptyList()
+        return raw.split(TRAIL_SEP).mapNotNull { entry ->
+            try {
+                val parts = entry.split(FIELD_SEP)
+                if (parts.size != 4) return@mapNotNull null
+                val savedAt = ZonedDateTime.parse(parts[0], DateTimeFormatter.ISO_ZONED_DATE_TIME)
+                val steps = parts[1].toInt()
+                val points = parsePoints(parts[2])
+                val timestamps = if (parts[3].isBlank()) emptyList()
+                    else parts[3].split(TS_SEP).mapNotNull { ts ->
+                        try { ZonedDateTime.parse(ts, DateTimeFormatter.ISO_ZONED_DATE_TIME) } catch (e: Exception) { null }
+                    }
+                if (points.isEmpty()) null else PreviousTrail(savedAt, steps, points, timestamps)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse previous trail: ${e.message}")
+                null
+            }
+        }
+    }
+
+    suspend fun appendToPreviousTrails(trail: PreviousTrail) {
+        if (trail.trailPoints.size < 2) return
+        val current = loadPreviousTrails().toMutableList()
+        current.add(0, trail)
+        if (current.size > MAX_PREV_TRAILS) current.subList(MAX_PREV_TRAILS, current.size).clear()
+        context.roadDataStore.edit { prefs ->
+            prefs[PREV_TRAILS_KEY] = current.joinToString(TRAIL_SEP) { t ->
+                val pts = t.trailPoints.joinToString(";") { "${it.latitude},${it.longitude}" }
+                val ts = t.stepTimestamps.joinToString(TS_SEP) { it.format(DateTimeFormatter.ISO_ZONED_DATE_TIME) }
+                "${t.savedAt.format(DateTimeFormatter.ISO_ZONED_DATE_TIME)}${FIELD_SEP}${t.steps}${FIELD_SEP}${pts}${FIELD_SEP}${ts}"
+            }
+        }
+    }
+
     private fun parseTimestamps(str: String?): List<ZonedDateTime> {
         if (str.isNullOrBlank()) return emptyList()
         return str.split(";").mapNotNull { ts ->
@@ -104,6 +146,13 @@ class RoadStepRepository(private val context: Context) {
         }
     }
 }
+
+data class PreviousTrail(
+    val savedAt: ZonedDateTime,
+    val steps: Int,
+    val trailPoints: List<GeoPoint>,
+    val stepTimestamps: List<ZonedDateTime>
+)
 
 data class RoadStepData(
     val steps: Int,

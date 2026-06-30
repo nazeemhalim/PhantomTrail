@@ -32,6 +32,7 @@ import androidx.core.content.FileProvider
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.phantomtrail.data.PreviousTrail
 import com.example.phantomtrail.data.StepRepository
 import com.example.phantomtrail.service.StepCounterService
 
@@ -421,6 +422,14 @@ class MainActivity : ComponentActivity() {
 
             Spacer(modifier = Modifier.height(16.dp))
             Button(
+                onClick = { showPreviousTrailsDialog() },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
+            ) {
+                Text("previous trails", color = Color.White, fontSize = 18.sp)
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(
                 onClick = { setStepLength() },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
             ) {
@@ -492,15 +501,7 @@ class MainActivity : ComponentActivity() {
                     Text("close", color = Color.White)
                 }
 
-                if (!isSelecting) {
-                    Button(
-                        onClick = { isSelectingStartLocation.value = true },
-                        modifier = Modifier.align(Alignment.TopStart).padding(16.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4A7C59))
-                    ) {
-                        Text("set start", color = Color.White)
-                    }
-                } else {
+                if (isSelecting) {
                     Text(
                         "Tap on map to set start location",
                         color = Color.White,
@@ -666,18 +667,7 @@ class MainActivity : ComponentActivity() {
                             val projection = mapView.projection
                             val geoPoint = projection.fromPixels(e.x.toInt(), e.y.toInt()) as GeoPoint
 
-                            customStartLat.value = geoPoint.latitude
-                            customStartLon.value = geoPoint.longitude
-
-                            scope.launch {
-                                repository.saveStartLocation(geoPoint.latitude, geoPoint.longitude)
-
-                                withContext(Dispatchers.Main) {
-                                    Toast.makeText(context, "Start location updated", Toast.LENGTH_SHORT).show()
-                                    isSelectingStartLocation.value = false
-                                    regenerateTrail()
-                                }
-                            }
+                            this@MainActivity.startNewTrailFromLocation(geoPoint)
                             return true
                         }
                         return false
@@ -834,7 +824,68 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
+    private fun saveCurrentTrailToHistory() {
+        val points = trailPoints.value
+        if (points.size < 2) return
+        val steps = StepCounterService.currentStepCount.value
+        scope.launch {
+            val timestamps = repository.loadStepData().timestamps
+            repository.appendToPreviousTrails(
+                PreviousTrail(
+                    savedAt = java.time.ZonedDateTime.now(),
+                    steps = steps,
+                    trailPoints = points,
+                    stepTimestamps = timestamps
+                )
+            )
+        }
+    }
+
+    private fun showPreviousTrailsDialog() {
+        scope.launch {
+            val trails = repository.loadPreviousTrails()
+            withContext(Dispatchers.Main) {
+                if (trails.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "No previous trails saved", Toast.LENGTH_SHORT).show()
+                    return@withContext
+                }
+                val fmt = java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy h:mm a")
+                val labels = trails.map { it.savedAt.format(fmt) }.toTypedArray()
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Previous Trails")
+                    .setItems(labels) { _, which -> loadPreviousTrail(trails[which]) }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun loadPreviousTrail(trail: PreviousTrail) {
+        saveCurrentTrailToHistory()
+
+        val firstPoint = trail.trailPoints.first()
+        customStartLat.value = firstPoint.latitude
+        customStartLon.value = firstPoint.longitude
+        trailPoints.value = trail.trailPoints
+        StepCounterService.currentStepCount.value = trail.steps
+        lastProcessedSteps = trail.steps
+        currentAngle = 0.0
+        accumulatedDistance = 0.0
+
+        scope.launch {
+            repository.saveStartLocation(firstPoint.latitude, firstPoint.longitude)
+            repository.saveTrailPoints(trail.trailPoints)
+            repository.saveSteps(trail.steps)
+            if (trail.stepTimestamps.isNotEmpty()) repository.saveTimestamps(trail.stepTimestamps)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "Trail loaded", Toast.LENGTH_SHORT).show()
+                showMapFlow.value = true
+            }
+        }
+    }
+
     private fun stopAndResetSteps() {
+        saveCurrentTrailToHistory()
         // Stop service if running
         if (StepCounterService.isRunning.value) {
             val serviceIntent = Intent(this, StepCounterService::class.java).apply {
@@ -862,33 +913,100 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startButton() {
-        val items = arrayOf("Start New Trail", "Continue Existing")
-        var checkedItems = -1
-
         if (StepCounterService.currentStepCount.value <= 0) {
-            startTracking()
-        } else {
-            AlertDialog.Builder(this)
-                .setTitle("Tracking options")
-                .setSingleChoiceItems(items, checkedItems) { _, which -> checkedItems = which }
-                .setPositiveButton("OK") { dialog, _ ->
-                    when (checkedItems) {
-                        0 -> {
-                            // Stop service first, wait, then reset and start
-                            scope.launch {
-                                stopAndResetSteps()
-                                delay(500) // Wait for service to fully stop
-                                withContext(Dispatchers.Main) {
-                                    startTracking()
-                                }
-                            }
-                        }
-                        1 -> startTracking()
-                    }
-                    dialog.dismiss()
+            showNewTrailDialog()
+            return
+        }
+        val items = arrayOf("Start New Trail", "Continue Existing", "Reset to Current")
+        var checkedItem = -1
+        AlertDialog.Builder(this)
+            .setTitle("Tracking options")
+            .setSingleChoiceItems(items, checkedItem) { _, which -> checkedItem = which }
+            .setPositiveButton("OK") { dialog, _ ->
+                when (checkedItem) {
+                    0 -> showNewTrailDialog()
+                    1 -> startTracking()
+                    2 -> resetToCurrentLocation()
                 }
-                .setNegativeButton("CANCEL") { dialog, _ -> dialog.dismiss() }
-                .show()
+                dialog.dismiss()
+            }
+            .setNegativeButton("CANCEL") { dialog, _ -> dialog.dismiss() }
+            .show()
+    }
+
+    private fun showNewTrailDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Start location")
+            .setItems(arrayOf("Select Start Location", "Keep Current")) { _, which ->
+                when (which) {
+                    0 -> {
+                        isSelectingStartLocation.value = true
+                        showMapFlow.value = true
+                    }
+                    1 -> scope.launch {
+                        stopAndResetSteps()
+                        delay(500)
+                        withContext(Dispatchers.Main) { startTracking() }
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun startNewTrailFromLocation(geoPoint: GeoPoint) {
+        saveCurrentTrailToHistory()
+        if (StepCounterService.isRunning.value) {
+            startService(Intent(this, StepCounterService::class.java).apply {
+                action = StepCounterService.ACTION_STOP
+            })
+        }
+        StepCounterService.isMainRunning.value = false
+        StepCounterService.currentStepCount.value = 0
+        customStartLat.value = geoPoint.latitude
+        customStartLon.value = geoPoint.longitude
+        trailPoints.value = listOf(geoPoint)
+        lastProcessedSteps = 0
+        currentAngle = 0.0
+        accumulatedDistance = 0.0
+        isSelectingStartLocation.value = false
+
+        scope.launch {
+            repository.resetAllData()
+            repository.saveStartLocation(geoPoint.latitude, geoPoint.longitude)
+            repository.saveTrailPoints(listOf(geoPoint))
+            withContext(Dispatchers.Main) { startTracking() }
+        }
+    }
+
+    private fun resetToCurrentLocation() {
+        saveCurrentTrailToHistory()
+        val currentPoint = trailPoints.value.lastOrNull() ?: run {
+            Toast.makeText(this, "No current location", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (StepCounterService.isRunning.value) {
+            startService(Intent(this, StepCounterService::class.java).apply {
+                action = StepCounterService.ACTION_STOP
+            })
+        }
+
+        StepCounterService.currentStepCount.value = 0
+        customStartLat.value = currentPoint.latitude
+        customStartLon.value = currentPoint.longitude
+        trailPoints.value = listOf(currentPoint)
+        lastProcessedSteps = 0
+        currentAngle = 0.0
+        accumulatedDistance = 0.0
+
+        scope.launch {
+            repository.resetAllData()
+            repository.saveStartLocation(currentPoint.latitude, currentPoint.longitude)
+            repository.saveTrailPoints(listOf(currentPoint))
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "Reset to current location", Toast.LENGTH_SHORT).show()
+                startTracking()
+            }
         }
     }
 

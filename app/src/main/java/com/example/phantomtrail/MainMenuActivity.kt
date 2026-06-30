@@ -76,7 +76,7 @@ class MainMenuActivity : ComponentActivity() {
                         Text("Upload to Strava", fontSize = 18.sp, color = Color.White)
                     }
                     Spacer(modifier = Modifier.height(64.dp))
-                    Text("V1.6.6", color = Color.DarkGray, fontSize = 12.sp)
+                    Text("V1.6.7", color = Color.DarkGray, fontSize = 12.sp)
                 }
             }
         }
