@@ -20,10 +20,6 @@
         android:name="android.hardware.sensor.stepcounter"
         android:required="false" />
 
-    <!-- osmdroid declares telephony as optional — remove it entirely since this app never uses it -->
-    <uses-feature
-        android:name="android.hardware.telephony"
-        tools:node="remove" />
 
     <application
         android:allowBackup="true"
