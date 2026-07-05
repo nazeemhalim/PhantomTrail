@@ -36,7 +36,7 @@ class StepRepository(private val context: Context) {
         private const val TS_SEP = "|"
     }
 
-    // Flow-based data access
+    // flow-based data access
     val stepCountFlow: Flow<Int> = context.dataStore.data.map { it[STEPS_KEY] ?: 0 }
     val stepLengthFlow: Flow<Double> = context.dataStore.data.map { it[STEP_LENGTH_KEY] ?: 0.75 }
     val startLocationFlow: Flow<Pair<Double, Double>> = context.dataStore.data.map {

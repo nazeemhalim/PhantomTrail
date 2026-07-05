@@ -8,9 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.time.ZonedDateTime
 
-/**
- * Handles step counting logic and state management
- */
+// handles step counting logic and state management
 class StepCountingManager(
     private val scope: CoroutineScope,
     private val onStepUpdate: () -> Unit
@@ -18,12 +16,7 @@ class StepCountingManager(
     companion object {
         private const val TAG = "StepCountingManager"
         private const val SENSOR_RESET_THRESHOLD = 300 // 5 minutes in seconds
-        // Minimum spacing between consecutive step timestamps. The sensor can deliver steps in
-        // rapid bursts (FASTEST delay / batched delivery / injected steps), stamping hundreds of
-        // steps within milliseconds and collapsing the exported pace. Capping the cadence here
-        // keeps the recorded timeline realistic: slower real walking keeps its real timing, while
-        // bursts are spread out to a target pace.
-        // 270 ms ≈ 0.75 m × (1000/270) ≈ 2.78 m/s ≈ 6:00/km (jog), matching a typical run export.
+        // minimum gap between step timestamps, spreads out sensor bursts to a realistic pace
         private const val MIN_STEP_INTERVAL_MS = 270L
     }
 
@@ -60,11 +53,7 @@ class StepCountingManager(
         Log.d(TAG, "StepCountingManager reset to 0")
     }
 
-    /**
-     * Returns the timestamp to record for the next step: real wall-clock time, but never closer
-     * than [MIN_STEP_INTERVAL_MS] to the previous step so bursts of steps spread to a realistic
-     * cadence instead of collapsing onto the same instant.
-     */
+    // next step timestamp, spaced at least MIN_STEP_INTERVAL_MS from the previous one
     private fun nextStepTimestamp(): ZonedDateTime {
         val now = ZonedDateTime.now()
         val prev = lastStepTimestamp
@@ -99,13 +88,13 @@ class StepCountingManager(
             val totalSteps = event.values[0].toInt()
             Log.d(TAG, "Sensor total: $totalSteps, Initial: $initialStepCount, Current: $currentSteps")
 
-            // Detect sensor reset (happens after reboot)
+            // detect sensor reset after reboot
             if (initialStepCount != -1 && totalSteps < initialStepCount) {
                 Log.d(TAG, "Sensor reset detected! Resetting initialStepCount.")
                 initialStepCount = -1
             }
 
-            // Set initial count
+            // set initial count
             if (initialStepCount == -1) {
                 initialStepCount = totalSteps - currentSteps
                 Log.d(TAG, "Set initial sensor count: $initialStepCount")
@@ -113,7 +102,7 @@ class StepCountingManager(
 
             val newStepCount = totalSteps - initialStepCount
 
-            // Add timestamps for new steps, spread at a realistic cadence
+            // add timestamps for new steps
             while (currentSteps < newStepCount) {
                 stepTimestamps.add(nextStepTimestamp())
                 currentSteps++

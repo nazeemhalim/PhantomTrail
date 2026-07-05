@@ -17,14 +17,22 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Text
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -36,6 +44,7 @@ import com.example.phantomtrail.data.PreviousTrail
 import com.example.phantomtrail.data.StepRepository
 import com.example.phantomtrail.service.StepCounterService
 
+import com.example.phantomtrail.ui.theme.HandjetFontFamily
 import com.example.phantomtrail.ui.theme.PhantomTrailTheme
 import com.example.phantomtrail.utils.GpxExporter
 import com.example.phantomtrail.utils.PhotoGpsProcessor
@@ -61,9 +70,8 @@ import android.graphics.Color as AndroidColor
 class MainActivity : ComponentActivity() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var isActive = false  // ADD THIS
+    private var isActive = false
 
-    // Refactored components - KEEP THESE
     private lateinit var repository: StepRepository
     private lateinit var photoProcessor: PhotoGpsProcessor
     private lateinit var gpxExporter: GpxExporter
@@ -95,14 +103,14 @@ class MainActivity : ComponentActivity() {
 
         val activityBaselineSteps = MutableStateFlow(0)
         private val stepLengthMeters = MutableStateFlow(0.75)
-        private val showMapFlow = MutableStateFlow(false)
+        val selectedTab = MutableStateFlow(0) // 0=Home, 1=Map, 2=Settings
 
-        // Trail generation state
+        // trail generation state
         private var lastProcessedSteps = 0
         private var currentAngle = 0.0
         private var accumulatedDistance = 0.0
 
-        // Slider
+        // slider
         private val photosNeedingManualLocation = MutableStateFlow<List<PhotoToTag>>(emptyList())
 
         private val selectedPhotoIndex = MutableStateFlow(0)
@@ -126,7 +134,6 @@ class MainActivity : ComponentActivity() {
             load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
         }
 
-        // Initialize refactored components
         repository = StepRepository(this)
         photoProcessor = PhotoGpsProcessor(this, contentResolver)
         gpxExporter = GpxExporter()
@@ -136,13 +143,13 @@ class MainActivity : ComponentActivity() {
         requestNecessaryPermissions()
         loadInitialData()
 
-        // Observe step count changes
+        // observe step count changes
         scope.launch(Dispatchers.Main) {
             StepCounterService.currentStepCount.collect { totalSteps ->
                 if (StepCounterService.activeActivity.value != com.example.phantomtrail.service.ActiveActivity.MAIN) return@collect
                 scope.launch {
                     repository.saveSteps(totalSteps)
-                    // Save timestamps from service
+                    // save timestamps from service
                     val timestamps = StepCounterService.getTimestamps()
                     repository.saveTimestamps(timestamps)
                 }
@@ -154,13 +161,25 @@ class MainActivity : ComponentActivity() {
             val serviceSteps by StepCounterService.currentStepCount.collectAsState()
             val serviceTracking by StepCounterService.isMainRunning.collectAsState()
             val stepLength by stepLengthMeters.collectAsState()
-            val showMap by showMapFlow.collectAsState()
+            val tab by selectedTab.collectAsState()
 
             PhantomTrailTheme {
-                if (showMap) {
-                    MapScreen(serviceSteps, serviceTracking)
-                } else {
-                    MainScreen(serviceSteps, serviceTracking, stepLength)
+                Scaffold(
+                    containerColor = Color.Black,
+                    bottomBar = {
+                        BottomNavBar(tab) { newTab ->
+                            if (newTab == 1) updateTrailPoints(StepCounterService.currentStepCount.value)
+                            selectedTab.value = newTab
+                        }
+                    }
+                ) { padding ->
+                    Box(modifier = Modifier.padding(padding)) {
+                        when (tab) {
+                            0 -> MainScreen(serviceSteps, serviceTracking, stepLength)
+                            1 -> MapScreen(serviceSteps, serviceTracking)
+                            2 -> SettingsScreen()
+                        }
+                    }
                 }
             }
         }
@@ -200,7 +219,7 @@ class MainActivity : ComponentActivity() {
                 customStartLat.value = stepData.customStartLat
                 customStartLon.value = stepData.customStartLon
 
-                // Load trail points
+                // load trail points
                 val points = repository.loadTrailPoints()
                 if (points.isNotEmpty()) {
                     withContext(Dispatchers.Main) {
@@ -238,12 +257,11 @@ class MainActivity : ComponentActivity() {
 
                 Log.d(TAG, "updateTrailPoints - totalSteps: $totalSteps, lastProcessed: $lastProcessedSteps")
 
-                // Load existing trail points
+                // load existing trail points
                 val points = repository.loadTrailPoints()
                 val existingPoints = repository.loadTrailPoints().toMutableList()
 
-
-                // If no existing points, create start point
+                // if no existing points, create start point
                 if (existingPoints.isEmpty()) {
                     existingPoints.add(GeoPoint(customStartLat.value, customStartLon.value))
                     lastProcessedSteps = 0
@@ -267,7 +285,7 @@ class MainActivity : ComponentActivity() {
                     return@launch
                 }
 
-                // Add new distance to accumulated distance
+                // add new distance to accumulated distance
                 val newDistance = newSteps * stepLengthMeters.value / 1000.0
                 accumulatedDistance += newDistance
 
@@ -279,22 +297,22 @@ class MainActivity : ComponentActivity() {
                     startLon + SCALE, startLat
                 )
 
-                // Calculate points based on accumulated distance
+                // calculate points based on accumulated distance
                 val newPointsToAdd = (accumulatedDistance / distanceBetweenPoints).toInt()
 
                 Log.d(TAG, "newDistance: $newDistance km, accumulated: $accumulatedDistance km, newPointsToAdd: $newPointsToAdd")
                 Log.d(TAG, "distanceBetweenPoints: $distanceBetweenPoints km = ${distanceBetweenPoints * 1000} meters")
 
                 if (newPointsToAdd > 0) {
-                    // Subtract the distance we're about to use
+                    // subtract the distance we're about to use
                     accumulatedDistance -= (newPointsToAdd * distanceBetweenPoints)
 
-                    // Get the last point as starting position
+                    // get the last point as starting position
                     val lastPoint = existingPoints.last()
                     var lat = lastPoint.latitude
                     var lon = lastPoint.longitude
 
-                    // Add new points
+                    // add new points
                     repeat(newPointsToAdd) {
                         lat += cos(currentAngle) * SCALE
                         lon += sin(currentAngle) * SCALE
@@ -302,7 +320,7 @@ class MainActivity : ComponentActivity() {
                         currentAngle += (Math.random() * angleVariability) - (angleVariability / 2.0)
                     }
 
-                    // Save to DataStore
+                    // save to datastore
                     val trailStr = existingPoints.joinToString(";") { "${it.latitude},${it.longitude}" }
                     repository.saveTrailPoints(existingPoints)
 
@@ -336,7 +354,7 @@ class MainActivity : ComponentActivity() {
                     return@launch
                 }
 
-                // Regenerate entire trail from scratch
+                // regenerate entire trail from scratch
                 val SCALE = 0.0001
                 val angleVariability = Math.PI / 7
                 val startLat = customStartLat.value
@@ -365,11 +383,11 @@ class MainActivity : ComponentActivity() {
                     angle += (Math.random() * angleVariability) - (angleVariability / 2.0)
                 }
 
-                // Save
+                // save
                 val trailStr = newPoints.joinToString(";") { "${it.latitude},${it.longitude}" }
                 repository.saveTrailPoints(newPoints)
 
-                // Update state
+                // update state
                 withContext(Dispatchers.Main) {
                     trailPoints.value = newPoints
                     currentAngle = angle
@@ -385,19 +403,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // ========== UI COMPOSABLES ==========
+    // ui composables
 
     @Composable
     fun MainScreen(serviceSteps: Int, serviceTracking: Boolean, stepLength: Double) {
         Column(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
+            modifier = Modifier.fillMaxSize().background(Color.Black)
         ) {
+            Text("Random Trail", color = Color(0xFF7B9E87), fontSize = 30.sp)
+            Spacer(modifier = Modifier.height(16.dp))
             Text("steps", color = Color(0xFF7B9E87), fontSize = 30.sp)
-            Text("$serviceSteps", color = Color.White, fontSize = 50.sp)
+            Text("$serviceSteps", color = Color.White, fontSize = 50.sp, fontFamily = HandjetFontFamily)
             Text(
                 String.format("%.2f km", serviceSteps * stepLength / 1000.0),
                 color = Color.Gray,
@@ -410,68 +428,107 @@ class MainActivity : ComponentActivity() {
                 fontSize = 24.sp
             )
             Spacer(modifier = Modifier.height(32.dp))
-
-            Button(
-                onClick = { if (serviceTracking) pauseTracking() else startButton() },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (serviceTracking) Color(0xFFFFA500) else Color(0xFF4A7C59)
+            IconButton(
+                onClick = { if (serviceTracking) pauseTracking() else startButton() }
+            ) {
+                Icon(
+                    imageVector = if (serviceTracking) Icons.Default.Refresh else Icons.Default.PlayArrow,
+                    contentDescription = if (serviceTracking) "Pause" else "Play",
+                    tint = if (serviceTracking) Color(0xFFFFA500) else Color(0xFF4A7C59),
+                    modifier = Modifier.size(36.dp)
                 )
-            ) {
-                Text(if (serviceTracking) "pause" else "start", color = Color.White, fontSize = 18.sp)
             }
+        }
+    }
 
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = { showPreviousTrailsDialog() },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
-            ) {
-                Text("previous trails", color = Color.White, fontSize = 18.sp)
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    fun SettingsScreen() {
+        val items = listOf(
+            Triple("Previous Trails", Color(0xFF3A3A3A)) { showPreviousTrailsDialog() },
+            Triple("Step Length",     Color(0xFF3A3A3A)) { setStepLength() },
+            Triple("Export GPX",      Color(0xFF3A3A3A)) { exportGPX() },
+            Triple("EXIF Tag Photos", Color(0xFF3A3A3A)) { selectPhotosForGPS() },
+            Triple("Location",        Color(0xFF3A3A3A)) { openInMapsApp() },
+            Triple("Upload to Strava",     Color(0xFF3A3A3A)) { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.strava.com/upload/select"))
+            )}
+        )
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            contentPadding = PaddingValues(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxSize().background(Color.Black)
+        ) {
+            items(items.size) { i ->
+                val (label, color, action) = items[i]
+                Card(
+                    onClick = action,
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = color),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(150.dp)
+                ) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        Text(
+                            label,
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
             }
+        }
+    }
 
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = { setStepLength() },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
-            ) {
-                Text("step length", color = Color.White, fontSize = 18.sp)
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = { exportGPX() },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
-            ) {
-                Text("export gpx", color = Color.White, fontSize = 18.sp)
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = { selectPhotosForGPS() },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
-            ) {
-                Text("exif", color = Color.White, fontSize = 18.sp)
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = {streetView()},
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
-            ) {
-                Text("show location", color = Color.White, fontSize = 18.sp)
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(
-                onClick = {
-                    showMapFlow.value = true
-                    updateTrailPoints(StepCounterService.currentStepCount.value)
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
-            ) {
-                Text("map", color = Color.White, fontSize = 18.sp)
-            }
-
-
+    @Composable
+    fun BottomNavBar(currentTab: Int, onTabSelected: (Int) -> Unit) {
+        NavigationBar(containerColor = Color(0xFF1A1A1A), tonalElevation = 0.dp) {
+            NavigationBarItem(
+                selected = currentTab == 0,
+                onClick = { onTabSelected(0) },
+                icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
+                label = { Text("Home") },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Color(0xFF4A7C59),
+                    selectedTextColor = Color(0xFF4A7C59),
+                    unselectedIconColor = Color.Gray,
+                    unselectedTextColor = Color.Gray,
+                    indicatorColor = Color(0xFF1A1A1A)
+                )
+            )
+            NavigationBarItem(
+                selected = currentTab == 1,
+                onClick = { onTabSelected(1) },
+                icon = { Icon(Icons.Default.LocationOn, contentDescription = "Map") },
+                label = { Text("Map") },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Color(0xFF4A7C59),
+                    selectedTextColor = Color(0xFF4A7C59),
+                    unselectedIconColor = Color.Gray,
+                    unselectedTextColor = Color.Gray,
+                    indicatorColor = Color(0xFF1A1A1A)
+                )
+            )
+            NavigationBarItem(
+                selected = currentTab == 2,
+                onClick = { onTabSelected(2) },
+                icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
+                label = { Text("Settings") },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Color(0xFF4A7C59),
+                    selectedTextColor = Color(0xFF4A7C59),
+                    unselectedIconColor = Color.Gray,
+                    unselectedTextColor = Color.Gray,
+                    indicatorColor = Color(0xFF1A1A1A)
+                )
+            )
         }
     }
 
@@ -486,21 +543,10 @@ class MainActivity : ComponentActivity() {
         Box(modifier = Modifier.fillMaxSize()) {
             OSMMapView()
 
-            // Hide buttons when photo tagging is active
+            // hide buttons when photo tagging is active
             val showButtons = photosNeedingLocation.isEmpty()
 
             if (showButtons) {
-                Button(
-                    onClick = {
-                        showMapFlow.value = false
-                        isSelectingStartLocation.value = false
-                    },
-                    modifier = Modifier.align(Alignment.TopEnd).padding(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
-                ) {
-                    Text("close", color = Color.White)
-                }
-
                 if (isSelecting) {
                     Text(
                         "Tap on map to set start location",
@@ -513,26 +559,58 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                Button(
-                    onClick = {},
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(128.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF606060))
-                ) {
-                    Text("$serviceSteps", color = Color.White)
-                }
+                val stepLen by stepLengthMeters.collectAsState()
+                val distanceKm = serviceSteps * stepLen / 1000.0
 
-                Button(
-                    onClick = { if (serviceTracking) pauseTracking() else startButton() },
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 64.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (serviceTracking) Color(0xFFFFA500) else Color(0xFF4A7C59)
-                    )
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 32.dp, start = 24.dp, end = 24.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color(0xCC1A1A1A)
                 ) {
-                    Text(if (serviceTracking) "pause" else "start", color = Color.White)
+                    Row(
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                "$serviceSteps",
+                                color = Color.White,
+                                fontSize = 36.sp,
+                                fontFamily = HandjetFontFamily
+                            )
+                            Text("steps", color = Color.LightGray, fontSize = 11.sp)
+                        }
+
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                "%.2f".format(distanceKm),
+                                color = Color.White,
+                                fontSize = 36.sp,
+                                fontFamily = HandjetFontFamily
+                            )
+                            Text("km", color = Color.LightGray, fontSize = 11.sp)
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        IconButton(
+                            onClick = { if (serviceTracking) pauseTracking() else startButton() }
+                        ) {
+                            Icon(
+                                imageVector = if (serviceTracking) Icons.Default.Refresh else Icons.Default.PlayArrow,
+                                contentDescription = if (serviceTracking) "Pause" else "Play",
+                                tint = if (serviceTracking) Color(0xFFFFA500) else Color(0xFF4A7C59),
+                                modifier = Modifier.size(36.dp)
+                            )
+                        }
+                    }
                 }
             }
 
-            // Photo tagging UI
+            // photo tagging ui
             if (photosNeedingLocation.isNotEmpty() && currentPhotoIndex < photosNeedingLocation.size) {
                 Column(
                     modifier = Modifier
@@ -549,7 +627,7 @@ class MainActivity : ComponentActivity() {
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Thumbnail with margin - smaller size
+                    // thumbnail with margin, smaller size
                     val currentPhoto = photosNeedingLocation[currentPhotoIndex]
                     Box(
                         modifier = Modifier
@@ -715,7 +793,7 @@ class MainActivity : ComponentActivity() {
                 }
                 mapView.overlays.add(startMarker)
 
-                // Add selected trackpoint marker for photo location
+                // add selected trackpoint marker for photo location
                 if (photosNeedingLocation.isNotEmpty() && sliderPosition < points.size) {
                     val selectedMarker = Marker(mapView).apply {
                         position = points[sliderPosition]
@@ -751,7 +829,7 @@ class MainActivity : ComponentActivity() {
         AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
     }
 
-    // ========== HELPER FUNCTIONS ==========
+    // helper functions
 
     override fun onResume() {
         super.onResume()
@@ -879,14 +957,14 @@ class MainActivity : ComponentActivity() {
             if (trail.stepTimestamps.isNotEmpty()) repository.saveTimestamps(trail.stepTimestamps)
             withContext(Dispatchers.Main) {
                 Toast.makeText(this@MainActivity, "Trail loaded", Toast.LENGTH_SHORT).show()
-                showMapFlow.value = true
+                selectedTab.value = 1
             }
         }
     }
 
     private fun stopAndResetSteps() {
         saveCurrentTrailToHistory()
-        // Stop service if running
+        // stop service if running
         if (StepCounterService.isRunning.value) {
             val serviceIntent = Intent(this, StepCounterService::class.java).apply {
                 action = StepCounterService.ACTION_STOP
@@ -894,7 +972,7 @@ class MainActivity : ComponentActivity() {
             startService(serviceIntent)
         }
 
-        // Reset all state
+        // reset all state
         StepCounterService.currentStepCount.value = 0
         trailPoints.value = listOf(GeoPoint(customStartLat.value, customStartLon.value))
         lastProcessedSteps = 0
@@ -937,11 +1015,11 @@ class MainActivity : ComponentActivity() {
     private fun showNewTrailDialog() {
         AlertDialog.Builder(this)
             .setTitle("Start location")
-            .setItems(arrayOf("Select Start Location", "Keep Current")) { _, which ->
+            .setItems(arrayOf("Select Start Location", "Keep Current Location")) { _, which ->
                 when (which) {
                     0 -> {
                         isSelectingStartLocation.value = true
-                        showMapFlow.value = true
+                        selectedTab.value = 1
                     }
                     1 -> scope.launch {
                         stopAndResetSteps()
@@ -1098,7 +1176,7 @@ class MainActivity : ComponentActivity() {
                         if (StepCounterService.activeActivity.value != com.example.phantomtrail.service.ActiveActivity.MAIN) return@collect
                         scope.launch {
                             repository.saveSteps(totalSteps)
-                            // Save timestamps from service
+                            // save timestamps from service
                             val timestamps = StepCounterService.getTimestamps()
                             repository.saveTimestamps(timestamps)
                         }
@@ -1112,7 +1190,7 @@ class MainActivity : ComponentActivity() {
                     return@launch
                 }
 
-                // Generate in cache first
+                // generate in cache first
                 val tempFile = gpxExporter.generateGpxFile(
                     cacheDir,
                     points,
@@ -1120,7 +1198,7 @@ class MainActivity : ComponentActivity() {
                     stepData.steps
                 )
 
-                // Save to Downloads
+                // save to downloads
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val values = ContentValues().apply {
                         put(MediaStore.Downloads.DISPLAY_NAME, tempFile.name)
@@ -1182,7 +1260,7 @@ class MainActivity : ComponentActivity() {
         pickMultipleMedia.launch(arrayOf("image/*"))
     }
 
-    private fun streetView() {
+    private fun openInMapsApp() {
         val currentPoint = trailPoints.value.lastOrNull()
         if (currentPoint == null) {
             Toast.makeText(this, "No location available", Toast.LENGTH_SHORT).show()
@@ -1252,7 +1330,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Process in-range photos
+                // process in-range photos
                 if (photosInRange.isNotEmpty()) {
                     val result = photoProcessor.processPhotos(photosInRange, points, stepData.timestamps)
                     withContext(Dispatchers.Main) {
@@ -1260,13 +1338,13 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Show slider for out-of-range photos
+                // show slider for out-of-range photos
                 if (photosOutOfRange.isNotEmpty()) {
                     photosNeedingManualLocation.value = photosOutOfRange
                     selectedPhotoIndex.value = 0
                     selectedTrackpointIndex.value = points.size / 2
                     withContext(Dispatchers.Main) {
-                        showMapFlow.value = true
+                        selectedTab.value = 1
                         Toast.makeText(this@MainActivity, "${photosOutOfRange.size} photos need manual location", Toast.LENGTH_LONG).show()
                     }
                 }
@@ -1299,7 +1377,7 @@ class MainActivity : ComponentActivity() {
                         Toast.LENGTH_SHORT
                     ).show()
 
-                    // Move to next photo or close
+                    // move to next photo or close
                     val remaining = photos.filterIndexed { i, _ -> i != photoIndex }
                     if (remaining.isNotEmpty()) {
                         photosNeedingManualLocation.value = remaining

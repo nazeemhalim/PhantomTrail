@@ -7,18 +7,14 @@ import java.time.Duration
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
-/**
- * GPX exporter - matches original logic but with improved pace data
- */
+// gpx exporter
 class GpxExporter {
     companion object {
         private const val TAG = "GpxExporter"
         private const val TIME_GAP_THRESHOLD_SECONDS = 300L // 5 minutes
     }
 
-    /**
-     * Generate GPX file from trail points and timestamps
-     */
+    // generate gpx file from trail points and timestamps
     fun generateGpxFile(
         outputDir: File,
         points: List<GeoPoint>,
@@ -56,10 +52,7 @@ class GpxExporter {
     }
 
 
-    /**
-     * Build a (timestamp, GeoPoint) list spread along the trail by step index.
-     * Used for EXIF tagging so photo positions match the GPX export exactly.
-     */
+    // timed trackpoints, reused by exif tagging so photo positions match the gpx export
     fun generateTimedTrackpoints(
         points: List<GeoPoint>,
         timestamps: List<ZonedDateTime>,
@@ -80,8 +73,7 @@ class GpxExporter {
             return timestamps.map { it to points.first() }
         }
 
-        // Spread timestamps evenly from trail start (0%) to current position (100%)
-        // so the first trackpoint is always at the original start point.
+        // spread timestamps evenly from trail start to current position
         val lastIndex = (timestamps.size - 1).coerceAtLeast(1)
         return timestamps.mapIndexed { i, ts ->
             val progress = (i.toDouble() / lastIndex).coerceIn(0.0, 1.0)
@@ -105,7 +97,7 @@ class GpxExporter {
         val trailDistance = distances.last()
 
         if (timestamps.size < 2 || trailDistance < 0.000001 || totalSteps <= 0) {
-            // Not enough data to spread trackpoints — emit single point at start
+            // not enough data, emit single point at start
             return createTrackpoint(
                 points.first().latitude,
                 points.first().longitude,
@@ -113,9 +105,7 @@ class GpxExporter {
             )
         }
 
-        // Spread timestamps evenly from the trail start (0%) to current position (100%).
-        // This ensures the GPX always starts at the original start point regardless of how
-        // many sessions the walk took.
+        // spread timestamps evenly from trail start to current position
         val lastIndex = (timestamps.size - 1).coerceAtLeast(1)
 
         val trackpoints = StringBuilder()
@@ -127,8 +117,7 @@ class GpxExporter {
             val timestampIndex = i.coerceAtMost(timestamps.size - 1)
             val currentTime = timestamps[timestampIndex]
 
-            // Skip if time gap is too large (pause detection), but advance lastTime
-            // so subsequent steps after the pause are not also discarded
+            // skip if time gap is too large (pause detection)
             val gap = Duration.between(lastTime, currentTime).seconds
             if (gap > TIME_GAP_THRESHOLD_SECONDS) {
                 lastTime = currentTime
@@ -149,7 +138,7 @@ class GpxExporter {
             lastAddedIndex = timestampIndex
         }
 
-        // Add last point ONLY if it's close in time to the previous point
+        // add last point only if close in time to the previous point
         val lastGap = Duration.between(lastTime, timestamps.last()).seconds
         if (lastGap <= 300 && lastAddedIndex < timestamps.size - 1) {
             trackpoints.append(createTrackpoint(

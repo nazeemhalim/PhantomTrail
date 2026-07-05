@@ -24,7 +24,7 @@ class RoadStepRepository(private val context: Context) {
         private val START_LON_KEY = doublePreferencesKey("start_lon")
         private val PREV_TRAILS_KEY = stringPreferencesKey("prev_trails")
         private const val MAX_PREV_TRAILS = 5
-        // Delimiters chosen to be safe against coordinate/ISO-date characters
+        // delimiters chosen to be safe against coordinate/iso-date characters
         private const val TRAIL_SEP = "¶"   // between trails
         private const val FIELD_SEP = "§"   // between fields inside one trail
         private const val TS_SEP = "|"       // between timestamps inside one trail

@@ -21,9 +21,7 @@ import java.util.*
 import java.time.Duration
 import kotlin.math.abs
 
-/**
- * Handles photo EXIF data processing and GPS tagging
- */
+// handles photo exif data processing and gps tagging
 class PhotoGpsProcessor(
     private val context: Context,
     private val contentResolver: ContentResolver
@@ -38,9 +36,7 @@ class PhotoGpsProcessor(
         val savedPhotoUris: List<Uri>
     )
 
-    /**
-     * Process multiple photos and add GPS coordinates
-     */
+    // process multiple photos and add gps coordinates
     suspend fun processPhotos(
         photoUris: List<Uri>,
         trailPoints: List<GeoPoint>,
@@ -81,7 +77,7 @@ class PhotoGpsProcessor(
         startTime: ZonedDateTime,
         endTime: ZonedDateTime
     ): Uri? {
-        // Create temp file
+        // create temp file
         val tempFile = File(context.cacheDir, "temp_${System.currentTimeMillis()}.jpg")
 
         contentResolver.openInputStream(uri)?.use { input ->
@@ -90,24 +86,24 @@ class PhotoGpsProcessor(
             }
         }
 
-        // Read EXIF and get timestamp
+        // read exif and get timestamp
         val exif = ExifInterface(tempFile.absolutePath)
         val photoTime = getPhotoTimestamp(exif, endTime)
 
-        // Find location on trail
+        // find location on trail
         val location = GeoUtils.findLocationForTime(photoTime, trailPoints, startTime, endTime)
 
-        // Update GPS coordinates
+        // update gps coordinates
         updateGpsCoordinates(exif, location)
         exif.saveAttributes()
 
-        // Try to overwrite original (Android 11+)
+        // try to overwrite original (android 11+)
         var overwritten = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             overwritten = tryOverwriteOriginal(uri, tempFile)
         }
 
-        // Fallback: Create new copy
+        // fallback: create new copy
         val resultUri = if (!overwritten) {
             savePhotoToSameDirectory(uri, tempFile)
         } else {
@@ -118,10 +114,7 @@ class PhotoGpsProcessor(
         return resultUri
     }
 
-    /**
-     * Tag photos using step-derived timed trackpoints (same source as GPX export).
-     * Each photo is matched to the trackpoint whose timestamp is closest to the photo's EXIF time.
-     */
+    // tag photos using step-derived timed trackpoints, matched by closest timestamp
     suspend fun processPhotos(
         photoUris: List<Uri>,
         timedTrackpoints: List<Pair<ZonedDateTime, GeoPoint>>
@@ -242,12 +235,12 @@ class PhotoGpsProcessor(
         val lat = location.latitude
         val lon = location.longitude
 
-        // Set latitude
+        // set latitude
         val latRef = if (lat >= 0) "N" else "S"
         exif.setAttribute(ExifInterface.TAG_GPS_LATITUDE, GeoUtils.convertToExifFormat(abs(lat)))
         exif.setAttribute(ExifInterface.TAG_GPS_LATITUDE_REF, latRef)
 
-        // Set longitude
+        // set longitude
         val lonRef = if (lon >= 0) "E" else "W"
         exif.setAttribute(ExifInterface.TAG_GPS_LONGITUDE, GeoUtils.convertToExifFormat(abs(lon)))
         exif.setAttribute(ExifInterface.TAG_GPS_LONGITUDE_REF, lonRef)
@@ -277,7 +270,7 @@ class PhotoGpsProcessor(
             val originalFileName = getFileName(originalUri) ?: "photo_${System.currentTimeMillis()}.jpg"
             var relativePath = Environment.DIRECTORY_PICTURES
 
-            // Get original path
+            // get original path
             contentResolver.query(originalUri, null, null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val pathIndex = cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)

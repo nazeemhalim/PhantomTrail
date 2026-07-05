@@ -23,10 +23,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.time.ZonedDateTime
 
-/**
- * Foreground service step counting
- */
-
+// foreground service step counting
 enum class ActiveActivity { NONE, MAIN, FOLLOW_GPX, FOLLOW_ROAD }
 
 class StepCounterService : Service(), SensorEventListener {
@@ -71,7 +68,7 @@ class StepCounterService : Service(), SensorEventListener {
 
         createNotificationChannel()
 
-        // Initialize step counting manager
+        // init step counting manager
         stepCountingManager = StepCountingManager(
             scope = scope,
             onStepUpdate = { updateStepCount() }
@@ -79,10 +76,7 @@ class StepCounterService : Service(), SensorEventListener {
 
         scope.launch {
             try {
-                // Seed with the saved timestamps so the recorded timeline survives service
-                // restarts (pause/resume, loop laps). Without this, each restart began with an
-                // empty timestamp list and the activity overwrote storage with only the
-                // post-restart slice — collapsing the exported duration.
+                // seed with saved timestamps so the timeline survives service restarts
                 val initialSteps: Int
                 val initialTimestamps: List<ZonedDateTime>
                 when (activeActivity.value) {
@@ -117,11 +111,11 @@ class StepCounterService : Service(), SensorEventListener {
 
         when (intent?.action) {
             ACTION_START -> {
-                // Wait for initialization if needed
+                // wait for initialization if needed
                 if (!isInitialized) {
                     Log.d(TAG, "Service not initialized yet, waiting...")
                     scope.launch {
-                        // Wait up to 2 seconds for initialization
+                        // wait up to 2 seconds for initialization
                         var waitCount = 0
                         while (!isInitialized && waitCount < 20) {
                             delay(100)
@@ -239,7 +233,7 @@ class StepCounterService : Service(), SensorEventListener {
     }
 
     private fun registerSensorListener() {
-        // Try STEP_COUNTER first
+        // try step_counter first
         stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
 
         if (stepSensor == null) {
@@ -317,7 +311,7 @@ class StepCounterService : Service(), SensorEventListener {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // Show correct steps based on active activity
+        // show correct steps based on active activity
         val displaySteps = when (activeActivity.value) {
             ActiveActivity.FOLLOW_GPX -> FollowGpxActivity.followGpxSteps.value
             ActiveActivity.FOLLOW_ROAD -> FollowRandomRoad.roadSteps.value
