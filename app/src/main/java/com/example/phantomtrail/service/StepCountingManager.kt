@@ -29,16 +29,23 @@ class StepCountingManager(
     private var lastSaveTime = 0L
     private val SAVE_INTERVAL_MS = 5000L // Save every 5 seconds max
 
-    suspend fun initialize(initialSteps: Int = 0, initialTimestamps: List<ZonedDateTime> = emptyList()) {
+    // restoring a previously saved sensor baseline lets the next sensor event compute the
+    // correct total (including any steps taken while the service was dead) instead of quietly
+    // rebasing to "no new steps happened"
+    suspend fun initialize(
+        initialSteps: Int = 0,
+        initialTimestamps: List<ZonedDateTime> = emptyList(),
+        savedInitialSensorCount: Int = -1
+    ) {
         try {
             currentSteps = initialSteps
-            initialStepCount = -1
+            initialStepCount = savedInitialSensorCount
             stepTimestamps.clear()
             stepTimestamps.addAll(initialTimestamps)
             lastStepTimestamp = initialTimestamps.lastOrNull()
             isInitialized = true
 
-            Log.d(TAG, "Initialized with $currentSteps steps, ${stepTimestamps.size} timestamps")
+            Log.d(TAG, "Initialized with $currentSteps steps, ${stepTimestamps.size} timestamps, baseline $initialStepCount")
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing: ${e.message}", e)
             isInitialized = true
@@ -137,4 +144,5 @@ class StepCountingManager(
 
     fun getCurrentSteps() = currentSteps
     fun getTimestamps() = stepTimestamps.toList()
+    fun getInitialSensorCount() = initialStepCount
 }

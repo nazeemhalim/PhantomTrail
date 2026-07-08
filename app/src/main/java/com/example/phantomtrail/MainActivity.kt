@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -40,8 +41,10 @@ import androidx.core.content.FileProvider
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.phantomtrail.data.AppPreferences
 import com.example.phantomtrail.data.PreviousTrail
 import com.example.phantomtrail.data.StepRepository
+import com.example.phantomtrail.utils.UnitUtils
 import com.example.phantomtrail.service.StepCounterService
 
 import com.example.phantomtrail.ui.theme.HandjetFontFamily
@@ -103,7 +106,9 @@ class MainActivity : ComponentActivity() {
 
         val activityBaselineSteps = MutableStateFlow(0)
         private val stepLengthMeters = MutableStateFlow(0.75)
-        val selectedTab = MutableStateFlow(0) // 0=Home, 1=Map, 2=Settings
+        private val useImperial = MutableStateFlow(false)
+        private val walkedTrailColor = MutableStateFlow(AppPreferences.DEFAULT_WALKED_TRAIL_COLOR)
+        val selectedTab = MutableStateFlow(0) // 0=Home, 1=Map, 2=Actions, 3=Settings
 
         // trail generation state
         private var lastProcessedSteps = 0
@@ -177,7 +182,8 @@ class MainActivity : ComponentActivity() {
                         when (tab) {
                             0 -> MainScreen(serviceSteps, serviceTracking, stepLength)
                             1 -> MapScreen(serviceSteps, serviceTracking)
-                            2 -> SettingsScreen()
+                            2 -> ActionsScreen()
+                            3 -> SettingsScreen()
                         }
                     }
                 }
@@ -218,6 +224,8 @@ class MainActivity : ComponentActivity() {
                 stepLengthMeters.value = stepData.stepLength
                 customStartLat.value = stepData.customStartLat
                 customStartLon.value = stepData.customStartLon
+                useImperial.value = AppPreferences.isImperial(this@MainActivity)
+                walkedTrailColor.value = AppPreferences.getWalkedTrailColor(this@MainActivity)
 
                 // load trail points
                 val points = repository.loadTrailPoints()
@@ -227,6 +235,14 @@ class MainActivity : ComponentActivity() {
                     }
                     lastProcessedSteps = stepData.steps
                     Log.d(TAG, "Loaded ${points.size} trail points")
+                }
+
+                // if tracking was active when the app/process was killed, resume it instead of
+                // silently landing back on the idle screen
+                if (repository.wasTracking()) {
+                    withContext(Dispatchers.Main) {
+                        startTracking()
+                    }
                 }
 
                 Log.d(TAG, "Loaded data: ${stepData.steps} steps")
@@ -407,6 +423,7 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     fun MainScreen(serviceSteps: Int, serviceTracking: Boolean, stepLength: Double) {
+        val imperial by useImperial.collectAsState()
         Column(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -417,7 +434,7 @@ class MainActivity : ComponentActivity() {
             Text("steps", color = Color(0xFF7B9E87), fontSize = 30.sp)
             Text("$serviceSteps", color = Color.White, fontSize = 50.sp, fontFamily = HandjetFontFamily)
             Text(
-                String.format("%.2f km", serviceSteps * stepLength / 1000.0),
+                UnitUtils.formatDistance(serviceSteps * stepLength / 1000.0, imperial),
                 color = Color.Gray,
                 fontSize = 16.sp
             )
@@ -443,16 +460,7 @@ class MainActivity : ComponentActivity() {
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
-    fun SettingsScreen() {
-        val items = listOf(
-            Triple("Previous Trails", Color(0xFF3A3A3A)) { showPreviousTrailsDialog() },
-            Triple("Step Length",     Color(0xFF3A3A3A)) { setStepLength() },
-            Triple("Export GPX",      Color(0xFF3A3A3A)) { exportGPX() },
-            Triple("EXIF Tag Photos", Color(0xFF3A3A3A)) { selectPhotosForGPS() },
-            Triple("Location",        Color(0xFF3A3A3A)) { openInMapsApp() },
-            Triple("Upload to Strava",     Color(0xFF3A3A3A)) { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.strava.com/upload/select"))
-            )}
-        )
+    fun ActionGrid(items: List<Triple<String, Color, () -> Unit>>) {
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             contentPadding = PaddingValues(16.dp),
@@ -487,6 +495,29 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    fun ActionsScreen() {
+        ActionGrid(listOf(
+            Triple("Previous Trails", Color(0xFF3A3A3A)) { showPreviousTrailsDialog() },
+            Triple("Export GPX",      Color(0xFF3A3A3A)) { exportGPX() },
+            Triple("EXIF Tag Photos", Color(0xFF3A3A3A)) { selectPhotosForGPS() },
+            Triple("View Location",   Color(0xFF3A3A3A)) { openInMapsApp() },
+            Triple("Upload to Strava",Color(0xFF3A3A3A)) { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.strava.com/upload/select"))
+            )}
+        ))
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    fun SettingsScreen() {
+        ActionGrid(listOf(
+            Triple("Step Length", Color(0xFF3A3A3A)) { setStepLength() },
+            Triple("Units",       Color(0xFF3A3A3A)) { setUnits() },
+            Triple("Trail Color", Color(0xFF3A3A3A)) { setTrailColor() }
+        ))
+    }
+
     @Composable
     fun BottomNavBar(currentTab: Int, onTabSelected: (Int) -> Unit) {
         NavigationBar(containerColor = Color(0xFF1A1A1A), tonalElevation = 0.dp) {
@@ -519,6 +550,19 @@ class MainActivity : ComponentActivity() {
             NavigationBarItem(
                 selected = currentTab == 2,
                 onClick = { onTabSelected(2) },
+                icon = { Icon(Icons.Default.List, contentDescription = "Actions") },
+                label = { Text("Actions") },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Color(0xFF4A7C59),
+                    selectedTextColor = Color(0xFF4A7C59),
+                    unselectedIconColor = Color.Gray,
+                    unselectedTextColor = Color.Gray,
+                    indicatorColor = Color(0xFF1A1A1A)
+                )
+            )
+            NavigationBarItem(
+                selected = currentTab == 3,
+                onClick = { onTabSelected(3) },
                 icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
                 label = { Text("Settings") },
                 colors = NavigationBarItemDefaults.colors(
@@ -560,7 +604,10 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val stepLen by stepLengthMeters.collectAsState()
+                val imperial by useImperial.collectAsState()
                 val distanceKm = serviceSteps * stepLen / 1000.0
+                val distanceValue = UnitUtils.distanceValue(distanceKm, imperial)
+                val distanceUnitLabel = UnitUtils.distanceUnitLabel(imperial)
 
                 Surface(
                     modifier = Modifier
@@ -586,12 +633,12 @@ class MainActivity : ComponentActivity() {
 
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(
-                                "%.2f".format(distanceKm),
+                                "%.2f".format(distanceValue),
                                 color = Color.White,
                                 fontSize = 36.sp,
                                 fontFamily = HandjetFontFamily
                             )
-                            Text("km", color = Color.LightGray, fontSize = 11.sp)
+                            Text(distanceUnitLabel, color = Color.LightGray, fontSize = 11.sp)
                         }
 
                         Spacer(modifier = Modifier.width(8.dp))
@@ -727,6 +774,7 @@ class MainActivity : ComponentActivity() {
         val startLon by customStartLon.collectAsState()
         val photosNeedingLocation by photosNeedingManualLocation.collectAsState()
         val sliderPosition by selectedTrackpointIndex.collectAsState()
+        val trailColor by walkedTrailColor.collectAsState()
 
         val mapView = remember {
             MapView(context).apply {
@@ -758,7 +806,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        LaunchedEffect(points.size, points.lastOrNull(), isSelecting, startLat, startLon, sliderPosition, photosNeedingLocation.isNotEmpty()) {
+        LaunchedEffect(points.size, points.lastOrNull(), isSelecting, startLat, startLon, sliderPosition, photosNeedingLocation.isNotEmpty(), trailColor) {
             val tapOverlay = if (isSelecting) mapView.overlays.firstOrNull() else null
             mapView.overlays.clear()
             if (tapOverlay != null) mapView.overlays.add(tapOverlay)
@@ -777,7 +825,7 @@ class MainActivity : ComponentActivity() {
                 if (points.size > 1) {
                     val polyline = Polyline().apply {
                         setPoints(points)
-                        outlinePaint.color = AndroidColor.rgb(123, 158, 135)
+                        outlinePaint.color = trailColor
                         outlinePaint.strokeWidth = 12f
                         outlinePaint.isAntiAlias = true
                     }
@@ -898,6 +946,47 @@ class MainActivity : ComponentActivity() {
                 }
             }
             .setMessage("Current: ${stepLengthMeters.value}m\n\nEnter step length in meters")
+            .setNegativeButton("CANCEL", null)
+            .show()
+    }
+
+    private fun setUnits() {
+        val options = arrayOf("Metric (km)", "Imperial (mi)")
+        var selected = if (useImperial.value) 1 else 0
+        AlertDialog.Builder(this)
+            .setTitle("Units")
+            .setSingleChoiceItems(options, selected) { _, which -> selected = which }
+            .setPositiveButton("OK") { _, _ ->
+                val imperial = selected == 1
+                useImperial.value = imperial
+                scope.launch { AppPreferences.setImperial(this@MainActivity, imperial) }
+            }
+            .setNegativeButton("CANCEL", null)
+            .show()
+    }
+
+    private fun setTrailColor() {
+        val presets = listOf(
+            "Green" to AndroidColor.rgb(74, 124, 89),
+            "Blue" to AndroidColor.rgb(66, 133, 244),
+            "Red" to AndroidColor.rgb(219, 68, 55),
+            "Orange" to AndroidColor.rgb(255, 152, 0),
+            "Purple" to AndroidColor.rgb(156, 39, 176),
+            "Cyan" to AndroidColor.rgb(0, 188, 212),
+            "Pink" to AndroidColor.rgb(233, 30, 99),
+            "Yellow" to AndroidColor.rgb(255, 235, 59),
+            "White" to AndroidColor.rgb(255, 255, 255)
+        )
+        val labels = presets.map { it.first }.toTypedArray()
+        var selected = presets.indexOfFirst { it.second == walkedTrailColor.value }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Trail Color")
+            .setSingleChoiceItems(labels, selected) { _, which -> selected = which }
+            .setPositiveButton("OK") { _, _ ->
+                val color = presets[selected].second
+                walkedTrailColor.value = color
+                scope.launch { AppPreferences.setWalkedTrailColor(this@MainActivity, color) }
+            }
             .setNegativeButton("CANCEL", null)
             .show()
     }

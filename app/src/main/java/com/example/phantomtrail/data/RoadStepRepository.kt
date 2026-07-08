@@ -16,8 +16,11 @@ class RoadStepRepository(private val context: Context) {
     companion object {
         private const val TAG = "RoadStepRepository"
         private val STEPS_KEY = intPreferencesKey("steps")
+        private val INITIAL_SENSOR_COUNT_KEY = intPreferencesKey("initial_sensor_count")
+        private val IS_TRACKING_KEY = booleanPreferencesKey("is_tracking")
         private val TIMESTAMPS_KEY = stringPreferencesKey("timestamps")
         private val STEP_LENGTH_KEY = doublePreferencesKey("step_length")
+        private val SEARCH_RADIUS_KEY = intPreferencesKey("search_radius_meters")
         private val TRAIL_POINTS_KEY = stringPreferencesKey("trail_points")
         private val ROAD_PATH_KEY = stringPreferencesKey("road_path")
         private val START_LAT_KEY = doublePreferencesKey("start_lat")
@@ -34,8 +37,10 @@ class RoadStepRepository(private val context: Context) {
         val prefs = context.roadDataStore.data.first()
         return RoadStepData(
             steps = prefs[STEPS_KEY] ?: 0,
+            initialSensorCount = prefs[INITIAL_SENSOR_COUNT_KEY] ?: -1,
             timestamps = parseTimestamps(prefs[TIMESTAMPS_KEY]),
             stepLength = prefs[STEP_LENGTH_KEY] ?: Constants.DEFAULT_STEP_LENGTH,
+            searchRadiusMeters = prefs[SEARCH_RADIUS_KEY] ?: 1000,
             customStartLat = prefs[START_LAT_KEY] ?: Constants.DEFAULT_START_LAT,
             customStartLon = prefs[START_LON_KEY] ?: Constants.DEFAULT_START_LON
         )
@@ -51,6 +56,17 @@ class RoadStepRepository(private val context: Context) {
         context.roadDataStore.edit { it[STEPS_KEY] = steps }
     }
 
+    suspend fun saveInitialSensorCount(value: Int) {
+        context.roadDataStore.edit { it[INITIAL_SENSOR_COUNT_KEY] = value }
+    }
+
+    suspend fun saveIsTracking(active: Boolean) {
+        context.roadDataStore.edit { it[IS_TRACKING_KEY] = active }
+    }
+
+    suspend fun wasTracking(): Boolean =
+        context.roadDataStore.data.first()[IS_TRACKING_KEY] ?: false
+
     suspend fun saveTimestamps(timestamps: List<ZonedDateTime>) {
         context.roadDataStore.edit { prefs ->
             prefs[TIMESTAMPS_KEY] = timestamps.joinToString(";") {
@@ -61,6 +77,10 @@ class RoadStepRepository(private val context: Context) {
 
     suspend fun saveStepLength(length: Double) {
         context.roadDataStore.edit { it[STEP_LENGTH_KEY] = length }
+    }
+
+    suspend fun saveSearchRadius(meters: Int) {
+        context.roadDataStore.edit { it[SEARCH_RADIUS_KEY] = meters }
     }
 
     suspend fun saveTrailPoints(points: List<GeoPoint>) {
@@ -85,9 +105,11 @@ class RoadStepRepository(private val context: Context) {
     suspend fun resetAllData() {
         context.roadDataStore.edit { prefs ->
             prefs[STEPS_KEY] = 0
+            prefs[INITIAL_SENSOR_COUNT_KEY] = -1
             prefs[TIMESTAMPS_KEY] = ""
             prefs[TRAIL_POINTS_KEY] = ""
             prefs[ROAD_PATH_KEY] = ""
+            prefs[IS_TRACKING_KEY] = false
         }
     }
 
@@ -156,8 +178,10 @@ data class PreviousTrail(
 
 data class RoadStepData(
     val steps: Int,
+    val initialSensorCount: Int,
     val timestamps: List<ZonedDateTime>,
     val stepLength: Double,
+    val searchRadiusMeters: Int,
     val customStartLat: Double,
     val customStartLon: Double
 )

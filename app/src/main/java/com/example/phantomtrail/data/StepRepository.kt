@@ -23,6 +23,7 @@ class StepRepository(private val context: Context) {
 
         private val STEPS_KEY = intPreferencesKey("saved_steps")
         private val INITIAL_SENSOR_COUNT_KEY = intPreferencesKey("initial_sensor_count")
+        private val IS_TRACKING_KEY = booleanPreferencesKey("is_tracking")
         private val TIMESTAMPS_KEY = stringPreferencesKey("step_timestamps")
         private val SESSION_START_KEY = stringPreferencesKey("session_start")
         private val STEP_LENGTH_KEY = doublePreferencesKey("step_length_meters")
@@ -108,6 +109,17 @@ class StepRepository(private val context: Context) {
         }
     }
 
+    suspend fun saveInitialSensorCount(value: Int) {
+        context.dataStore.edit { prefs -> prefs[INITIAL_SENSOR_COUNT_KEY] = value }
+    }
+
+    suspend fun saveIsTracking(active: Boolean) {
+        context.dataStore.edit { prefs -> prefs[IS_TRACKING_KEY] = active }
+    }
+
+    suspend fun wasTracking(): Boolean =
+        context.dataStore.data.first()[IS_TRACKING_KEY] ?: false
+
     suspend fun saveTrailPoints(points: List<GeoPoint>) {
         val trailStr = points.joinToString(";") { "${it.latitude},${it.longitude}" }
         context.dataStore.edit { prefs ->
@@ -128,6 +140,7 @@ class StepRepository(private val context: Context) {
             prefs[INITIAL_SENSOR_COUNT_KEY] = -1
             prefs[TIMESTAMPS_KEY] = ""
             prefs[SESSION_START_KEY] = ZonedDateTime.now().toString()
+            prefs[IS_TRACKING_KEY] = false
         }
     }
 

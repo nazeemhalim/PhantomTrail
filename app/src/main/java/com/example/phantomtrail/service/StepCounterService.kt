@@ -32,6 +32,8 @@ class StepCounterService : Service(), SensorEventListener {
     private var stepSensor: Sensor? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var repository: StepRepository
+    private lateinit var roadRepository: RoadStepRepository
+    private lateinit var gpxRepository: FollowGpxStepRepository
     private lateinit var stepCountingManager: StepCountingManager
 
     private var notificationManager: NotificationManager? = null
@@ -65,6 +67,8 @@ class StepCounterService : Service(), SensorEventListener {
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         repository = StepRepository(this)
+        roadRepository = RoadStepRepository(this)
+        gpxRepository = FollowGpxStepRepository(this)
 
         createNotificationChannel()
 
@@ -76,30 +80,35 @@ class StepCounterService : Service(), SensorEventListener {
 
         scope.launch {
             try {
-                // seed with saved timestamps so the timeline survives service restarts
+                // seed with saved timestamps and sensor baseline so both the timeline and step
+                // count survive service restarts (pause/resume, or the OS killing the process)
                 val initialSteps: Int
                 val initialTimestamps: List<ZonedDateTime>
+                val initialSensorCount: Int
                 when (activeActivity.value) {
                     ActiveActivity.FOLLOW_GPX -> {
-                        val saved = FollowGpxStepRepository(this@StepCounterService).loadStepData()
+                        val saved = gpxRepository.loadStepData()
                         initialSteps = saved.steps
                         initialTimestamps = saved.timestamps
+                        initialSensorCount = saved.initialSensorCount
                     }
                     ActiveActivity.FOLLOW_ROAD -> {
-                        val saved = RoadStepRepository(this@StepCounterService).loadStepData()
+                        val saved = roadRepository.loadStepData()
                         initialSteps = saved.steps
                         initialTimestamps = saved.timestamps
+                        initialSensorCount = saved.initialSensorCount
                     }
                     else -> {
                         val stepData = repository.loadStepData()
                         initialSteps = stepData.steps
                         initialTimestamps = stepData.timestamps
+                        initialSensorCount = stepData.initialSensorCount
                     }
                 }
-                stepCountingManager.initialize(initialSteps, initialTimestamps)
+                stepCountingManager.initialize(initialSteps, initialTimestamps, initialSensorCount)
                 currentStepCount.value = stepCountingManager.getCurrentSteps()
                 isInitialized = true
-                Log.d(TAG, "Service initialized with $initialSteps steps, ${initialTimestamps.size} timestamps")
+                Log.d(TAG, "Service initialized with $initialSteps steps, ${initialTimestamps.size} timestamps, baseline $initialSensorCount")
             } catch (e: Exception) {
                 Log.e(TAG, "Error initializing: ${e.message}", e)
             }
@@ -153,6 +162,7 @@ class StepCounterService : Service(), SensorEventListener {
             registerSensorListener()
 
             isRunning.value = true
+            scope.launch { activeRepositorySaveIsTracking(true) }
             Log.d(TAG, "Tracking started successfully")
         } catch (e: Exception) {
             Log.e(TAG, "Error starting tracking: ${e.message}", e)
@@ -168,6 +178,7 @@ class StepCounterService : Service(), SensorEventListener {
             releaseWakeLock()
 
             isRunning.value = false
+            scope.launch { activeRepositorySaveIsTracking(false) }
             stopForeground()
             stopSelf()
 
@@ -175,6 +186,14 @@ class StepCounterService : Service(), SensorEventListener {
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping tracking: ${e.message}", e)
             stopSelf()
+        }
+    }
+
+    private suspend fun activeRepositorySaveIsTracking(active: Boolean) {
+        when (activeActivity.value) {
+            ActiveActivity.FOLLOW_GPX -> gpxRepository.saveIsTracking(active)
+            ActiveActivity.FOLLOW_ROAD -> roadRepository.saveIsTracking(active)
+            else -> repository.saveIsTracking(active)
         }
     }
 
@@ -273,6 +292,26 @@ class StepCounterService : Service(), SensorEventListener {
         Log.d(TAG, "updateStepCount - New count: $newCount")
         currentStepCount.value = newCount
         updateNotification()
+
+        // persist steps + sensor baseline on every update (not just from the activity) so a
+        // killed process never loses more progress than the single most recent sensor event
+        val baseline = stepCountingManager.getInitialSensorCount()
+        scope.launch {
+            when (activeActivity.value) {
+                ActiveActivity.FOLLOW_GPX -> {
+                    gpxRepository.saveSteps(newCount)
+                    gpxRepository.saveInitialSensorCount(baseline)
+                }
+                ActiveActivity.FOLLOW_ROAD -> {
+                    roadRepository.saveSteps(newCount)
+                    roadRepository.saveInitialSensorCount(baseline)
+                }
+                else -> {
+                    repository.saveSteps(newCount)
+                    repository.saveInitialSensorCount(baseline)
+                }
+            }
+        }
     }
 
 

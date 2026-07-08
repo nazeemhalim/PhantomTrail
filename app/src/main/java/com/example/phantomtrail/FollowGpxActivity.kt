@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -37,8 +38,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
+import com.example.phantomtrail.data.AppPreferences
 import com.example.phantomtrail.data.StepRepository
 import com.example.phantomtrail.data.FollowGpxStepRepository
+import com.example.phantomtrail.data.PreviousTrail
+import com.example.phantomtrail.utils.UnitUtils
 import com.example.phantomtrail.service.StepCounterService
 import com.example.phantomtrail.ui.theme.HandjetFontFamily
 import com.example.phantomtrail.ui.theme.PhantomTrailTheme
@@ -105,11 +109,15 @@ class FollowGpxActivity : ComponentActivity() {
     }
     companion object {
         private const val TAG = "FollowGpxActivity"
-        private const val LOOP_CLOSING_THRESHOLD_KM = 0.01 // 10 metres
+        private val loopClosingThresholdKm = MutableStateFlow(0.01) // default 10 metres
         val followGpxSteps = MutableStateFlow(0)
         private var lastRawSensorValue = -1
         private val stepLengthMeters = MutableStateFlow(0.75)
-        val selectedTab = MutableStateFlow(0) // 0=Home, 1=Map, 2=Settings
+        private val searchRadiusMeters = MutableStateFlow(1000)
+        const val MAX_SEARCH_RADIUS_METERS = 10000
+        private val useImperial = MutableStateFlow(false)
+        private val walkedTrailColor = MutableStateFlow(AppPreferences.DEFAULT_WALKED_TRAIL_COLOR)
+        val selectedTab = MutableStateFlow(0) // 0=Home, 1=Map, 2=Actions, 3=Settings
 
         val importedTrailPoints = MutableStateFlow<List<GeoPoint>>(emptyList())
         val currentPosition = MutableStateFlow(0)
@@ -192,6 +200,9 @@ class FollowGpxActivity : ComponentActivity() {
             val savedExtendedStart = followGpxRepository.loadExtendedStartTrail()
             val wasContinuingFromStart = followGpxRepository.wasUserContinuingFromStart()
             val wasRoad = followGpxRepository.wasContinueAsRoad()
+            val wasTracking = followGpxRepository.wasTracking()
+            val imperial = AppPreferences.isImperial(this@FollowGpxActivity)
+            val trailColor = AppPreferences.getWalkedTrailColor(this@FollowGpxActivity)
 
             withContext(Dispatchers.Main) {
                 if (savedTrail.isNotEmpty() && wasImported) {
@@ -215,8 +226,18 @@ class FollowGpxActivity : ComponentActivity() {
                 }
                 startStepCount.value = stepData.startStepCount
                 stepLengthMeters.value = stepData.stepLength
+                searchRadiusMeters.value = stepData.searchRadiusMeters
+                loopClosingThresholdKm.value = stepData.loopClosingThresholdMeters / 1000.0
+                useImperial.value = imperial
+                walkedTrailColor.value = trailColor
                 followGpxSteps.value = stepData.steps
                 lastRawSensorValue = -1
+
+                // if tracking was active when the app/process was killed, resume it instead of
+                // silently landing back on the idle screen
+                if (wasTracking) {
+                    startService()
+                }
             }
         }
 
@@ -271,7 +292,8 @@ class FollowGpxActivity : ComponentActivity() {
                         when (tab) {
                             0 -> MainScreen(gpxSteps, serviceTracking, stepLength, hasGpx)
                             1 -> if (hasGpx) MapScreen(gpxSteps, serviceTracking)
-                            2 -> if (hasGpx) SettingsScreen()
+                            2 -> if (hasGpx) ActionsScreen()
+                            3 -> if (hasGpx) SettingsScreen()
                         }
                     }
                 }
@@ -345,6 +367,9 @@ class FollowGpxActivity : ComponentActivity() {
                     }
                     return@launch
                 }
+
+                // archive the trail being replaced before wiping session state
+                saveCurrentTrailToHistory()
 
                 // reset all state
                 followGpxRepository.resetAllData()
@@ -701,7 +726,7 @@ class FollowGpxActivity : ComponentActivity() {
         if (roadFetchInProgress) return
         roadFetchInProgress = true
         scope.launch {
-            val path = roadGenerator.generateRoadPath(from)
+            val path = roadGenerator.generateRoadPath(from, searchRadiusMeters = searchRadiusMeters.value)
             withContext(Dispatchers.Main) {
                 roadFetchInProgress = false
                 if (path.isNotEmpty()) {
@@ -724,7 +749,7 @@ class FollowGpxActivity : ComponentActivity() {
         Toast.makeText(this, "Checking for roads nearby…", Toast.LENGTH_SHORT).show()
         roadFetchInProgress = true
         scope.launch {
-            val path = roadGenerator.generateRoadPath(startPt)
+            val path = roadGenerator.generateRoadPath(startPt, searchRadiusMeters = searchRadiusMeters.value)
             withContext(Dispatchers.Main) {
                 roadFetchInProgress = false
                 if (path.isNotEmpty()) {
@@ -844,6 +869,7 @@ class FollowGpxActivity : ComponentActivity() {
 
     @Composable
     fun MainScreen(serviceSteps: Int, serviceTracking: Boolean, stepLength: Double, hasGpx: Boolean) {
+        val imperial by useImperial.collectAsState()
         Column(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -854,7 +880,7 @@ class FollowGpxActivity : ComponentActivity() {
             Text("steps", color = Color(0xFF7B9E87), fontSize = 24.sp)
             Text("$serviceSteps", color = Color.White, fontSize = 50.sp, fontFamily = HandjetFontFamily)
             Text(
-                String.format("%.2f km", serviceSteps * stepLength / 1000.0),
+                UnitUtils.formatDistance(serviceSteps * stepLength / 1000.0, imperial),
                 color = Color.Gray,
                 fontSize = 16.sp
             )
@@ -892,15 +918,7 @@ class FollowGpxActivity : ComponentActivity() {
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
-    fun SettingsScreen() {
-        val items = listOf(
-            Triple("Step Length",     Color(0xFF3A3A3A)) { setStepLength() },
-            Triple("Export GPX",      Color(0xFF3A3A3A)) { exportGPX() },
-            Triple("EXIF Tag Photos", Color(0xFF3A3A3A)) { selectPhotosForGPS() },
-            Triple("Location",        Color(0xFF3A3A3A)) { openInMapsApp() },
-            Triple("Upload to Strava",     Color(0xFF3A3A3A)) { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.strava.com/upload/select"))
-        )})
-
+    fun ActionGrid(items: List<Triple<String, Color, () -> Unit>>) {
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             contentPadding = PaddingValues(16.dp),
@@ -933,6 +951,28 @@ class FollowGpxActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    @Composable
+    fun ActionsScreen() {
+        ActionGrid(listOf(
+            Triple("Previous Trails", Color(0xFF3A3A3A)) { showPreviousTrailsDialog() },
+            Triple("Export GPX",      Color(0xFF3A3A3A)) { exportGPX() },
+            Triple("EXIF Tag Photos", Color(0xFF3A3A3A)) { selectPhotosForGPS() },
+            Triple("View Location",   Color(0xFF3A3A3A)) { openInMapsApp() },
+            Triple("Upload to Strava",Color(0xFF3A3A3A)) { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.strava.com/upload/select"))) }
+        ))
+    }
+
+    @Composable
+    fun SettingsScreen() {
+        ActionGrid(listOf(
+            Triple("Step Length",   Color(0xFF3A3A3A)) { setStepLength() },
+            Triple("Search Radius", Color(0xFF3A3A3A)) { setSearchRadius() },
+            Triple("Loop Threshold",Color(0xFF3A3A3A)) { setLoopClosingThreshold() },
+            Triple("Units",         Color(0xFF3A3A3A)) { setUnits() },
+            Triple("Trail Color",   Color(0xFF3A3A3A)) { setTrailColor() }
+        ))
     }
 
     @Composable
@@ -971,6 +1011,22 @@ class FollowGpxActivity : ComponentActivity() {
                 selected = currentTab == 2,
                 enabled = hasGpx,
                 onClick = { onTabSelected(2) },
+                icon = { Icon(Icons.Default.List, contentDescription = "Actions") },
+                label = { Text("Actions") },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Color(0xFF4A7C59),
+                    selectedTextColor = Color(0xFF4A7C59),
+                    unselectedIconColor = Color.Gray,
+                    unselectedTextColor = Color.Gray,
+                    disabledIconColor = Color.DarkGray,
+                    disabledTextColor = Color.DarkGray,
+                    indicatorColor = Color(0xFF1A1A1A)
+                )
+            )
+            NavigationBarItem(
+                selected = currentTab == 3,
+                enabled = hasGpx,
+                onClick = { onTabSelected(3) },
                 icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
                 label = { Text("Settings") },
                 colors = NavigationBarItemDefaults.colors(
@@ -1015,7 +1071,10 @@ class FollowGpxActivity : ComponentActivity() {
 
             if (showButtons) {
                 val stepLen by stepLengthMeters.collectAsState()
+                val imperial by useImperial.collectAsState()
                 val distanceKm = serviceSteps * stepLen / 1000.0
+                val distanceValue = UnitUtils.distanceValue(distanceKm, imperial)
+                val distanceUnitLabel = UnitUtils.distanceUnitLabel(imperial)
 
                 Surface(
                     modifier = Modifier
@@ -1041,12 +1100,12 @@ class FollowGpxActivity : ComponentActivity() {
 
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(
-                                "%.2f".format(distanceKm),
+                                "%.2f".format(distanceValue),
                                 color = Color.White,
                                 fontSize = 36.sp,
                                 fontFamily = HandjetFontFamily
                             )
-                            Text("km", color = Color.LightGray, fontSize = 11.sp)
+                            Text(distanceUnitLabel, color = Color.LightGray, fontSize = 11.sp)
                         }
 
                         Spacer(modifier = Modifier.width(8.dp))
@@ -1185,6 +1244,7 @@ class FollowGpxActivity : ComponentActivity() {
         val isRevStartExt by isReversingFromStartExtended.collectAsState()
         val startExtRevMarker by startExtendedReverseMarker.collectAsState()
         val resetIdx by trailResetIndexState.collectAsState()
+        val trailColor by walkedTrailColor.collectAsState()
 
         // combined trail for the photo slider, starts from trailResetIndex to match export
         val combinedPoints = remember(points, extendedPoints, extendedStartPoints, isContinuing, isContinuingFromStart, resetIdx) {
@@ -1204,13 +1264,13 @@ class FollowGpxActivity : ComponentActivity() {
             }
         }
 
-        LaunchedEffect(points.size, position, gpxSteps, extendedPoints.size, extendedStartPoints.size, sliderPosition, photosNeedingLocation.isNotEmpty(), loopTrail, isRevExt, extRevMarker, isReversing, isRevStartExt, startExtRevMarker, resetIdx) {
+        LaunchedEffect(points.size, position, gpxSteps, extendedPoints.size, extendedStartPoints.size, sliderPosition, photosNeedingLocation.isNotEmpty(), loopTrail, isRevExt, extRevMarker, isReversing, isRevStartExt, startExtRevMarker, resetIdx, trailColor) {
             mapView.overlays.clear()
 
             if (points.isNotEmpty()) {
                 val safePos = position.coerceIn(0, points.size - 1)
                 val gray = AndroidColor.rgb(150, 150, 150)
-                val green = AndroidColor.rgb(74, 124, 89)
+                val green = trailColor
 
                 // full imported trail as gray base layer
                 val polyline = Polyline().apply {
@@ -1496,7 +1556,7 @@ class FollowGpxActivity : ComponentActivity() {
     private fun showModeDialog() {
         val pts = importedTrailPoints.value
         val trailCanLoop = pts.size > 2 &&
-                calculateDistance(pts.last(), pts.first()) <= LOOP_CLOSING_THRESHOLD_KM
+                calculateDistance(pts.last(), pts.first()) <= loopClosingThresholdKm.value
 
         val options = mutableListOf<String>()
         options.add("Continue")
@@ -1596,38 +1656,44 @@ class FollowGpxActivity : ComponentActivity() {
             StepCounterService.isFollowGpxRunning.value = false
         }
 
-        importedTrailPoints.value = emptyList()
-        gpxImported.value = false
-        currentPosition.value = 0
-        startStepCount.value = 0
-        reachedEnd.value = false
-        userChoseToContinue.value = false
-        extendedTrailPoints.value = emptyList()
-        selectedTab.value = 0
-        lastGeneratedSteps = 0
-        accumulatedExtendedDistance = 0.0
-
-        isReversing.value = false
-        reverseStartSteps.value = 0
-        segmentBaselineSteps = 0
-        trailResetIndex = 0; trailResetIndexState.value = 0
-        exportStartIndex = 0
-        extendedStartTrailPoints.value = emptyList()
-        userChoseToContinueFromStart.value = false
-        lastStartExtendedSteps = 0
-        startExtendedAngle = 0.0
-        accumulatedStartExtendedDistance = 0.0
-        isLoopTrail.value = false
-        completedLaps = 0
-        pendingReverse.value = false
-        isReversingFromExtended.value = false
-        extendedReverseStartSteps = 0
-        extendedReverseMarker.value = null
-        isReversingFromStartExtended.value = false
-        startExtendedReverseStartSteps = 0
-        startExtendedReverseMarker.value = null
-
         scope.launch {
+            // archive the current trail before wiping it, otherwise it's gone by the time
+            // the GPX picker returns and importGpxFile() tries to save history
+            saveCurrentTrailToHistory()
+
+            withContext(Dispatchers.Main) {
+                importedTrailPoints.value = emptyList()
+                gpxImported.value = false
+                currentPosition.value = 0
+                startStepCount.value = 0
+                reachedEnd.value = false
+                userChoseToContinue.value = false
+                extendedTrailPoints.value = emptyList()
+                selectedTab.value = 0
+                lastGeneratedSteps = 0
+                accumulatedExtendedDistance = 0.0
+
+                isReversing.value = false
+                reverseStartSteps.value = 0
+                segmentBaselineSteps = 0
+                trailResetIndex = 0; trailResetIndexState.value = 0
+                exportStartIndex = 0
+                extendedStartTrailPoints.value = emptyList()
+                userChoseToContinueFromStart.value = false
+                lastStartExtendedSteps = 0
+                startExtendedAngle = 0.0
+                accumulatedStartExtendedDistance = 0.0
+                isLoopTrail.value = false
+                completedLaps = 0
+                pendingReverse.value = false
+                isReversingFromExtended.value = false
+                extendedReverseStartSteps = 0
+                extendedReverseMarker.value = null
+                isReversingFromStartExtended.value = false
+                startExtendedReverseStartSteps = 0
+                startExtendedReverseMarker.value = null
+            }
+
             followGpxRepository.resetAllData()
             followGpxRepository.saveExtendedTrail(emptyList(), false)
             withContext(Dispatchers.Main) {
@@ -1655,13 +1721,206 @@ class FollowGpxActivity : ComponentActivity() {
             .setPositiveButton("OK") { _, _ ->
                 val value = input.text.toString()
                 if (value.isNotEmpty()) {
-                    stepLengthMeters.value = value.toDouble()
+                    val number = value.toDouble()
+                    stepLengthMeters.value = number
+                    scope.launch { followGpxRepository.saveStepLength(number) }
                     Toast.makeText(this, "Step length: $value m", Toast.LENGTH_SHORT).show()
                 }
             }
             .setMessage("Current: ${stepLengthMeters.value}m")
             .setNegativeButton("CANCEL", null)
             .show()
+    }
+
+    private fun setSearchRadius() {
+        val input = EditText(this)
+        input.inputType = InputType.TYPE_CLASS_NUMBER
+        AlertDialog.Builder(this)
+            .setTitle("Search Radius")
+            .setView(input)
+            .setMessage("Current: ${searchRadiusMeters.value}m\n\nEnter road search radius in meters\n\nNote: Maximum distance is 10km")
+            .setPositiveButton("OK") { _, _ ->
+                val value = input.text.toString()
+                if (value.isNotEmpty()) {
+                    val number = value.toIntOrNull()
+                    if (number == null || number <= 0) {
+                        Toast.makeText(this, "Enter a valid distance", Toast.LENGTH_SHORT).show()
+                        return@setPositiveButton
+                    }
+                    if (number > MAX_SEARCH_RADIUS_METERS) {
+                        AlertDialog.Builder(this)
+                            .setTitle("Distance too large")
+                            .setMessage("Exceeds maximum distance of ${MAX_SEARCH_RADIUS_METERS / 1000}km. Setting to ${MAX_SEARCH_RADIUS_METERS / 1000}km.")
+                            .setPositiveButton("OK") { _, _ ->
+                                searchRadiusMeters.value = MAX_SEARCH_RADIUS_METERS
+                                scope.launch { followGpxRepository.saveSearchRadius(MAX_SEARCH_RADIUS_METERS) }
+                            }
+                            .show()
+                    } else {
+                        searchRadiusMeters.value = number
+                        scope.launch { followGpxRepository.saveSearchRadius(number) }
+                        Toast.makeText(this, "Search radius: ${number}m", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .setNegativeButton("CANCEL", null)
+            .show()
+    }
+
+    private fun setLoopClosingThreshold() {
+        val input = EditText(this)
+        input.inputType = InputType.TYPE_CLASS_NUMBER
+        val currentMeters = (loopClosingThresholdKm.value * 1000).toInt()
+        AlertDialog.Builder(this)
+            .setTitle("Loop Threshold")
+            .setView(input)
+            .setMessage("Current: ${currentMeters}m\n\nHow close the route's end must be to its start to offer \"Loop\" mode, in meters")
+            .setPositiveButton("OK") { _, _ ->
+                val value = input.text.toString()
+                if (value.isNotEmpty()) {
+                    val number = value.toIntOrNull()
+                    if (number == null || number <= 0) {
+                        Toast.makeText(this, "Enter a valid distance", Toast.LENGTH_SHORT).show()
+                        return@setPositiveButton
+                    }
+                    val km = number / 1000.0
+                    loopClosingThresholdKm.value = km
+                    scope.launch { followGpxRepository.saveLoopClosingThreshold(number) }
+                    Toast.makeText(this, "Loop threshold: ${number}m", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("CANCEL", null)
+            .show()
+    }
+
+    private fun setUnits() {
+        val options = arrayOf("Metric (km)", "Imperial (mi)")
+        var selected = if (useImperial.value) 1 else 0
+        AlertDialog.Builder(this)
+            .setTitle("Units")
+            .setSingleChoiceItems(options, selected) { _, which -> selected = which }
+            .setPositiveButton("OK") { _, _ ->
+                val imperial = selected == 1
+                useImperial.value = imperial
+                scope.launch { AppPreferences.setImperial(this@FollowGpxActivity, imperial) }
+            }
+            .setNegativeButton("CANCEL", null)
+            .show()
+    }
+
+    private fun setTrailColor() {
+        val presets = listOf(
+            "Green" to AndroidColor.rgb(74, 124, 89),
+            "Blue" to AndroidColor.rgb(66, 133, 244),
+            "Red" to AndroidColor.rgb(219, 68, 55),
+            "Orange" to AndroidColor.rgb(255, 152, 0),
+            "Purple" to AndroidColor.rgb(156, 39, 176),
+            "Cyan" to AndroidColor.rgb(0, 188, 212),
+            "Pink" to AndroidColor.rgb(233, 30, 99),
+            "Yellow" to AndroidColor.rgb(255, 235, 59),
+            "White" to AndroidColor.rgb(255, 255, 255)
+        )
+        val labels = presets.map { it.first }.toTypedArray()
+        var selected = presets.indexOfFirst { it.second == walkedTrailColor.value }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Trail Color")
+            .setSingleChoiceItems(labels, selected) { _, which -> selected = which }
+            .setPositiveButton("OK") { _, _ ->
+                val color = presets[selected].second
+                walkedTrailColor.value = color
+                scope.launch { AppPreferences.setWalkedTrailColor(this@FollowGpxActivity, color) }
+            }
+            .setNegativeButton("CANCEL", null)
+            .show()
+    }
+
+    private suspend fun saveCurrentTrailToHistory() {
+        val points = importedTrailPoints.value
+        if (points.size < 2 || !gpxImported.value) return
+        val steps = followGpxSteps.value
+        val timestamps = followGpxRepository.loadStepData().timestamps
+        followGpxRepository.appendToPreviousTrails(
+            PreviousTrail(
+                savedAt = ZonedDateTime.now(),
+                steps = steps,
+                trailPoints = points,
+                stepTimestamps = timestamps
+            )
+        )
+    }
+
+    private fun showPreviousTrailsDialog() {
+        scope.launch {
+            val trails = followGpxRepository.loadPreviousTrails()
+            withContext(Dispatchers.Main) {
+                if (trails.isEmpty()) {
+                    Toast.makeText(this@FollowGpxActivity, "No previous trails saved", Toast.LENGTH_SHORT).show()
+                    return@withContext
+                }
+                val fmt = DateTimeFormatter.ofPattern("MMM d, yyyy h:mm a")
+                val labels = trails.map { it.savedAt.format(fmt) }.toTypedArray()
+                AlertDialog.Builder(this@FollowGpxActivity)
+                    .setTitle("Previous Trails")
+                    .setItems(labels) { _, which -> loadPreviousTrail(trails[which]) }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun loadPreviousTrail(trail: PreviousTrail) {
+        val resetIntent = Intent(this, StepCounterService::class.java).apply {
+            action = StepCounterService.ACTION_RESET
+        }
+        startService(resetIntent)
+
+        scope.launch {
+            saveCurrentTrailToHistory()
+            followGpxRepository.resetAllData()
+            followGpxRepository.saveStartStepCount(0)
+
+            withContext(Dispatchers.Main) {
+                importedTrailPoints.value = trail.trailPoints
+                accumulatedExtendedDistance = 0.0
+                extendedTrailPoints.value = emptyList()
+                lastGeneratedSteps = 0
+                continueAngle = 0.0
+                followGpxSteps.value = trail.steps
+                lastRawSensorValue = -1
+                startStepCount.value = 0
+                StepCounterService.currentStepCount.value = trail.steps
+                currentPosition.value = 0
+                reachedEnd.value = false
+                userChoseToContinue.value = false
+                gpxImported.value = true
+                selectedTab.value = 1
+
+                isReversing.value = false
+                reverseStartSteps.value = 0
+                segmentBaselineSteps = 0
+                trailResetIndex = 0; trailResetIndexState.value = 0
+                exportStartIndex = 0
+                extendedStartTrailPoints.value = emptyList()
+                userChoseToContinueFromStart.value = false
+                lastStartExtendedSteps = 0
+                startExtendedAngle = 0.0
+                accumulatedStartExtendedDistance = 0.0
+                isLoopTrail.value = false
+                completedLaps = 0
+                pendingReverse.value = false
+                isReversingFromExtended.value = false
+                extendedReverseStartSteps = 0
+                extendedReverseMarker.value = null
+                isReversingFromStartExtended.value = false
+                startExtendedReverseStartSteps = 0
+                startExtendedReverseMarker.value = null
+                Toast.makeText(this@FollowGpxActivity, "Loaded ${trail.trailPoints.size} points", Toast.LENGTH_SHORT).show()
+            }
+
+            followGpxRepository.saveImportedTrail(trail.trailPoints)
+            followGpxRepository.saveSteps(trail.steps)
+            if (trail.stepTimestamps.isNotEmpty()) followGpxRepository.saveTimestamps(trail.stepTimestamps)
+        }
     }
     private fun buildFullTrail(): List<GeoPoint> {
         val imported = importedTrailPoints.value
