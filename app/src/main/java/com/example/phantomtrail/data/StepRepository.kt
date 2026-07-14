@@ -27,6 +27,7 @@ class StepRepository(private val context: Context) {
         private val TIMESTAMPS_KEY = stringPreferencesKey("step_timestamps")
         private val SESSION_START_KEY = stringPreferencesKey("session_start")
         private val STEP_LENGTH_KEY = doublePreferencesKey("step_length_meters")
+        private val PATH_WAVINESS_KEY = doublePreferencesKey("path_waviness_degrees")
         private val TRAIL_POINTS_KEY = stringPreferencesKey("trail_points")
         private val CUSTOM_START_LAT_KEY = doublePreferencesKey("custom_start_lat")
         private val CUSTOM_START_LON_KEY = doublePreferencesKey("custom_start_lon")
@@ -54,6 +55,7 @@ class StepRepository(private val context: Context) {
             initialSensorCount = prefs[INITIAL_SENSOR_COUNT_KEY] ?: -1,
             timestamps = parseTimestamps(prefs[TIMESTAMPS_KEY]),
             stepLength = prefs[STEP_LENGTH_KEY] ?: 0.75,
+            pathWavinessDegrees = prefs[PATH_WAVINESS_KEY] ?: Constants.DEFAULT_PATH_WAVINESS_DEGREES,
             sessionStart = prefs[SESSION_START_KEY]?.let { ZonedDateTime.parse(it) },
             customStartLat = prefs[CUSTOM_START_LAT_KEY] ?: Constants.DEFAULT_START_LAT,
             customStartLon = prefs[CUSTOM_START_LON_KEY] ?: Constants.DEFAULT_START_LON
@@ -107,6 +109,10 @@ class StepRepository(private val context: Context) {
         context.dataStore.edit { prefs ->
             prefs[STEP_LENGTH_KEY] = length
         }
+    }
+
+    suspend fun savePathWaviness(degrees: Double) {
+        context.dataStore.edit { prefs -> prefs[PATH_WAVINESS_KEY] = degrees }
     }
 
     suspend fun saveInitialSensorCount(value: Int) {
@@ -204,6 +210,7 @@ data class StepData(
     val initialSensorCount: Int,
     val timestamps: List<ZonedDateTime>,
     val stepLength: Double,
+    val pathWavinessDegrees: Double,
     val sessionStart: ZonedDateTime?,
     val customStartLat: Double,
     val customStartLon: Double
@@ -213,4 +220,5 @@ object Constants {
     const val DEFAULT_START_LAT = 2.9279088973999023
     const val DEFAULT_START_LON = 101.64179229736328
     const val DEFAULT_STEP_LENGTH = 0.75
+    const val DEFAULT_PATH_WAVINESS_DEGREES = 25.7 // matches the original hardcoded PI/7 angle variability
 }

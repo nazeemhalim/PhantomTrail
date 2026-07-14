@@ -21,6 +21,7 @@ class RoadStepRepository(private val context: Context) {
         private val TIMESTAMPS_KEY = stringPreferencesKey("timestamps")
         private val STEP_LENGTH_KEY = doublePreferencesKey("step_length")
         private val SEARCH_RADIUS_KEY = intPreferencesKey("search_radius_meters")
+        private val PATH_WAVINESS_KEY = doublePreferencesKey("path_waviness_degrees")
         private val TRAIL_POINTS_KEY = stringPreferencesKey("trail_points")
         private val ROAD_PATH_KEY = stringPreferencesKey("road_path")
         private val START_LAT_KEY = doublePreferencesKey("start_lat")
@@ -41,6 +42,7 @@ class RoadStepRepository(private val context: Context) {
             timestamps = parseTimestamps(prefs[TIMESTAMPS_KEY]),
             stepLength = prefs[STEP_LENGTH_KEY] ?: Constants.DEFAULT_STEP_LENGTH,
             searchRadiusMeters = prefs[SEARCH_RADIUS_KEY] ?: 1000,
+            pathWavinessMeters = prefs[PATH_WAVINESS_KEY] ?: 2.0,
             customStartLat = prefs[START_LAT_KEY] ?: Constants.DEFAULT_START_LAT,
             customStartLon = prefs[START_LON_KEY] ?: Constants.DEFAULT_START_LON
         )
@@ -81,6 +83,10 @@ class RoadStepRepository(private val context: Context) {
 
     suspend fun saveSearchRadius(meters: Int) {
         context.roadDataStore.edit { it[SEARCH_RADIUS_KEY] = meters }
+    }
+
+    suspend fun savePathWaviness(meters: Double) {
+        context.roadDataStore.edit { it[PATH_WAVINESS_KEY] = meters }
     }
 
     suspend fun saveTrailPoints(points: List<GeoPoint>) {
@@ -182,6 +188,7 @@ data class RoadStepData(
     val timestamps: List<ZonedDateTime>,
     val stepLength: Double,
     val searchRadiusMeters: Int,
+    val pathWavinessMeters: Double,
     val customStartLat: Double,
     val customStartLon: Double
 )

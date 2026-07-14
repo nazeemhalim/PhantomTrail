@@ -20,13 +20,29 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Loop
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Straighten
+import androidx.compose.material.icons.filled.Timeline
+import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -115,9 +131,10 @@ class FollowGpxActivity : ComponentActivity() {
         private val stepLengthMeters = MutableStateFlow(0.75)
         private val searchRadiusMeters = MutableStateFlow(1000)
         const val MAX_SEARCH_RADIUS_METERS = 10000
+        private val pathWavinessMeters = MutableStateFlow(2.0)
         private val useImperial = MutableStateFlow(false)
         private val walkedTrailColor = MutableStateFlow(AppPreferences.DEFAULT_WALKED_TRAIL_COLOR)
-        val selectedTab = MutableStateFlow(0) // 0=Home, 1=Map, 2=Actions, 3=Settings
+        val selectedTab = MutableStateFlow(0) // 0=Map, 1=Actions, 2=Settings
 
         val importedTrailPoints = MutableStateFlow<List<GeoPoint>>(emptyList())
         val currentPosition = MutableStateFlow(0)
@@ -228,6 +245,7 @@ class FollowGpxActivity : ComponentActivity() {
                 stepLengthMeters.value = stepData.stepLength
                 searchRadiusMeters.value = stepData.searchRadiusMeters
                 loopClosingThresholdKm.value = stepData.loopClosingThresholdMeters / 1000.0
+                pathWavinessMeters.value = stepData.pathWavinessMeters
                 useImperial.value = imperial
                 walkedTrailColor.value = trailColor
                 followGpxSteps.value = stepData.steps
@@ -271,7 +289,6 @@ class FollowGpxActivity : ComponentActivity() {
         setContent {
             val gpxSteps by followGpxSteps.collectAsState()
             val serviceTracking by StepCounterService.isFollowGpxRunning.collectAsState()
-            val stepLength by stepLengthMeters.collectAsState()
             val tab by selectedTab.collectAsState()
             val hasGpx by gpxImported.collectAsState()
 
@@ -289,11 +306,24 @@ class FollowGpxActivity : ComponentActivity() {
                     }
                 ) { padding ->
                     Box(modifier = Modifier.padding(padding)) {
-                        when (tab) {
-                            0 -> MainScreen(gpxSteps, serviceTracking, stepLength, hasGpx)
-                            1 -> if (hasGpx) MapScreen(gpxSteps, serviceTracking)
-                            2 -> if (hasGpx) ActionsScreen()
-                            3 -> if (hasGpx) SettingsScreen()
+                        AnimatedContent(
+                            targetState = tab,
+                            transitionSpec = {
+                                if (targetState > initialState) {
+                                    (slideInHorizontally(tween(250)) { it } + fadeIn(tween(250))) togetherWith
+                                        (slideOutHorizontally(tween(250)) { -it } + fadeOut(tween(250)))
+                                } else {
+                                    (slideInHorizontally(tween(250)) { -it } + fadeIn(tween(250))) togetherWith
+                                        (slideOutHorizontally(tween(250)) { it } + fadeOut(tween(250)))
+                                }
+                            },
+                            label = "tabContent"
+                        ) { targetTab ->
+                            when (targetTab) {
+                                0 -> MapScreen(gpxSteps, serviceTracking, hasGpx)
+                                1 -> if (hasGpx) ActionsScreen()
+                                2 -> if (hasGpx) SettingsScreen()
+                            }
                         }
                     }
                 }
@@ -331,6 +361,13 @@ class FollowGpxActivity : ComponentActivity() {
         }
         StepCounterService.activeActivity.value = com.example.phantomtrail.service.ActiveActivity.NONE
     }
+
+    override fun finish() {
+        super.finish()
+        @Suppress("DEPRECATION")
+        overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+    }
+
     private fun requestNecessaryPermissions() {
         val permissionsToRequest = mutableListOf<String>()
 
@@ -390,7 +427,7 @@ class FollowGpxActivity : ComponentActivity() {
                     reachedEnd.value = false
                     userChoseToContinue.value = false
                     gpxImported.value = true
-                    selectedTab.value = 1
+                    selectedTab.value = 0
                     followGpxRepository.saveExtendedTrail(emptyList(), false)
                     extendedTrailPoints.value = emptyList()
                     userChoseToContinue.value = false
@@ -636,7 +673,7 @@ class FollowGpxActivity : ComponentActivity() {
         if (continueAsRoad.value) { generateRoadExtension(totalSteps); return }
         scope.launch {
             val SCALE = 0.0001
-            val angleVariability = Math.PI / 7
+            val angleVariability = (Math.PI / 7) * (pathWavinessMeters.value / 2.0)
 
             val newSteps = totalSteps - lastGeneratedSteps
             if (newSteps <= 0) return@launch
@@ -726,7 +763,7 @@ class FollowGpxActivity : ComponentActivity() {
         if (roadFetchInProgress) return
         roadFetchInProgress = true
         scope.launch {
-            val path = roadGenerator.generateRoadPath(from, searchRadiusMeters = searchRadiusMeters.value)
+            val path = roadGenerator.generateRoadPath(from, searchRadiusMeters = searchRadiusMeters.value, maxDeviationMeters = pathWavinessMeters.value)
             withContext(Dispatchers.Main) {
                 roadFetchInProgress = false
                 if (path.isNotEmpty()) {
@@ -749,7 +786,7 @@ class FollowGpxActivity : ComponentActivity() {
         Toast.makeText(this, "Checking for roads nearby…", Toast.LENGTH_SHORT).show()
         roadFetchInProgress = true
         scope.launch {
-            val path = roadGenerator.generateRoadPath(startPt, searchRadiusMeters = searchRadiusMeters.value)
+            val path = roadGenerator.generateRoadPath(startPt, searchRadiusMeters = searchRadiusMeters.value, maxDeviationMeters = pathWavinessMeters.value)
             withContext(Dispatchers.Main) {
                 roadFetchInProgress = false
                 if (path.isNotEmpty()) {
@@ -814,7 +851,7 @@ class FollowGpxActivity : ComponentActivity() {
     private fun generateExtendedTrailFromStart(totalSteps: Int) {
         scope.launch {
             val SCALE = 0.0001
-            val angleVariability = Math.PI / 7
+            val angleVariability = (Math.PI / 7) * (pathWavinessMeters.value / 2.0)
 
             val newSteps = totalSteps - lastStartExtendedSteps
             if (newSteps <= 0) return@launch
@@ -867,58 +904,9 @@ class FollowGpxActivity : ComponentActivity() {
         return R * c
     }
 
-    @Composable
-    fun MainScreen(serviceSteps: Int, serviceTracking: Boolean, stepLength: Double, hasGpx: Boolean) {
-        val imperial by useImperial.collectAsState()
-        Column(
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.fillMaxSize().background(Color.Black)
-        ) {
-            Text("Follow GPX", color = Color(0xFF7B9E87), fontSize = 30.sp)
-            Spacer(modifier = Modifier.height(16.dp))
-            Text("steps", color = Color(0xFF7B9E87), fontSize = 24.sp)
-            Text("$serviceSteps", color = Color.White, fontSize = 50.sp, fontFamily = HandjetFontFamily)
-            Text(
-                UnitUtils.formatDistance(serviceSteps * stepLength / 1000.0, imperial),
-                color = Color.Gray,
-                fontSize = 16.sp
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                if (serviceTracking) "tracking..." else "stopped",
-                color = if (serviceTracking) Color(0xFF4A7C59) else Color.Gray,
-                fontSize = 24.sp
-            )
-            Spacer(modifier = Modifier.height(32.dp))
-
-            if (!hasGpx) {
-                Button(
-                    onClick = {
-                        pickGpxFile.launch(arrayOf("application/gpx+xml", "application/xml", "text/xml", "*/*"))
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4A7C59))
-                ) {
-                    Text("Import GPX", color = Color.White, fontSize = 18.sp)
-                }
-            } else {
-                IconButton(
-                    onClick = { if (serviceTracking) pauseTracking() else startTracking() }
-                ) {
-                    Icon(
-                        imageVector = if (serviceTracking) Icons.Default.Refresh else Icons.Default.PlayArrow,
-                        contentDescription = if (serviceTracking) "Pause" else "Play",
-                        tint = if (serviceTracking) Color(0xFFFFA500) else Color(0xFF4A7C59),
-                        modifier = Modifier.size(36.dp)
-                    )
-                }
-            }
-        }
-    }
-
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
-    fun ActionGrid(items: List<Triple<String, Color, () -> Unit>>) {
+    fun ActionGrid(items: List<ActionItem>) {
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             contentPadding = PaddingValues(16.dp),
@@ -927,25 +915,34 @@ class FollowGpxActivity : ComponentActivity() {
             modifier = Modifier.fillMaxSize().background(Color.Black)
         ) {
             items(items.size) { i ->
-                val (label, color, action) = items[i]
+                val item = items[i]
                 Card(
-                    onClick = action,
+                    onClick = item.action,
                     shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = color),
+                    colors = CardDefaults.cardColors(containerColor = item.color),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(150.dp)
                 ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier.fillMaxSize()
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxSize().padding(12.dp)
                     ) {
+                        if (item.icon != null) {
+                            Icon(
+                                imageVector = item.icon,
+                                contentDescription = item.label,
+                                tint = Color.White,
+                                modifier = Modifier.size(32.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
                         Text(
-                            label,
+                            item.label,
                             color = Color.White,
                             fontSize = 15.sp,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(12.dp)
+                            textAlign = TextAlign.Center
                         )
                     }
                 }
@@ -956,22 +953,23 @@ class FollowGpxActivity : ComponentActivity() {
     @Composable
     fun ActionsScreen() {
         ActionGrid(listOf(
-            Triple("Previous Trails", Color(0xFF3A3A3A)) { showPreviousTrailsDialog() },
-            Triple("Export GPX",      Color(0xFF3A3A3A)) { exportGPX() },
-            Triple("EXIF Tag Photos", Color(0xFF3A3A3A)) { selectPhotosForGPS() },
-            Triple("View Location",   Color(0xFF3A3A3A)) { openInMapsApp() },
-            Triple("Upload to Strava",Color(0xFF3A3A3A)) { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.strava.com/upload/select"))) }
+            ActionItem("Previous Trails", Color(0xFF3A3A3A), Icons.Default.History) { showPreviousTrailsDialog() },
+            ActionItem("Export GPX",      Color(0xFF3A3A3A), Icons.Default.Share) { exportGPX() },
+            ActionItem("EXIF Tag Photos", Color(0xFF3A3A3A), Icons.Default.PhotoCamera) { selectPhotosForGPS() },
+            ActionItem("View Location",   Color(0xFF3A3A3A), Icons.Default.LocationOn) { openInMapsApp() },
+            ActionItem("Upload to Strava",Color(0xFF3A3A3A), Icons.Default.CloudUpload) { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.strava.com/upload/select"))) }
         ))
     }
 
     @Composable
     fun SettingsScreen() {
         ActionGrid(listOf(
-            Triple("Step Length",   Color(0xFF3A3A3A)) { setStepLength() },
-            Triple("Search Radius", Color(0xFF3A3A3A)) { setSearchRadius() },
-            Triple("Loop Threshold",Color(0xFF3A3A3A)) { setLoopClosingThreshold() },
-            Triple("Units",         Color(0xFF3A3A3A)) { setUnits() },
-            Triple("Trail Color",   Color(0xFF3A3A3A)) { setTrailColor() }
+            ActionItem("Step Length",   Color(0xFF3A3A3A), Icons.Default.Straighten) { setStepLength() },
+            ActionItem("Search Radius", Color(0xFF3A3A3A), Icons.Default.TravelExplore) { setSearchRadius() },
+            ActionItem("Loop Threshold",Color(0xFF3A3A3A), Icons.Default.Loop) { setLoopClosingThreshold() },
+            ActionItem("Path Deviation", Color(0xFF3A3A3A), Icons.Default.Timeline) { setPathWaviness() },
+            ActionItem("Units",         Color(0xFF3A3A3A), Icons.Default.Public) { setUnits() },
+            ActionItem("Trail Color",   Color(0xFF3A3A3A), Icons.Default.Palette) { setTrailColor() }
         ))
     }
 
@@ -981,8 +979,8 @@ class FollowGpxActivity : ComponentActivity() {
             NavigationBarItem(
                 selected = currentTab == 0,
                 onClick = { onTabSelected(0) },
-                icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
-                label = { Text("Home") },
+                icon = { Icon(Icons.Default.LocationOn, contentDescription = "Map") },
+                label = { Text("Map") },
                 colors = NavigationBarItemDefaults.colors(
                     selectedIconColor = Color(0xFF4A7C59),
                     selectedTextColor = Color(0xFF4A7C59),
@@ -995,8 +993,8 @@ class FollowGpxActivity : ComponentActivity() {
                 selected = currentTab == 1,
                 enabled = hasGpx,
                 onClick = { onTabSelected(1) },
-                icon = { Icon(Icons.Default.LocationOn, contentDescription = "Map") },
-                label = { Text("Map") },
+                icon = { Icon(Icons.Default.List, contentDescription = "Actions") },
+                label = { Text("Actions") },
                 colors = NavigationBarItemDefaults.colors(
                     selectedIconColor = Color(0xFF4A7C59),
                     selectedTextColor = Color(0xFF4A7C59),
@@ -1011,22 +1009,6 @@ class FollowGpxActivity : ComponentActivity() {
                 selected = currentTab == 2,
                 enabled = hasGpx,
                 onClick = { onTabSelected(2) },
-                icon = { Icon(Icons.Default.List, contentDescription = "Actions") },
-                label = { Text("Actions") },
-                colors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = Color(0xFF4A7C59),
-                    selectedTextColor = Color(0xFF4A7C59),
-                    unselectedIconColor = Color.Gray,
-                    unselectedTextColor = Color.Gray,
-                    disabledIconColor = Color.DarkGray,
-                    disabledTextColor = Color.DarkGray,
-                    indicatorColor = Color(0xFF1A1A1A)
-                )
-            )
-            NavigationBarItem(
-                selected = currentTab == 3,
-                enabled = hasGpx,
-                onClick = { onTabSelected(3) },
                 icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
                 label = { Text("Settings") },
                 colors = NavigationBarItemDefaults.colors(
@@ -1043,7 +1025,27 @@ class FollowGpxActivity : ComponentActivity() {
     }
 
     @Composable
-    fun MapScreen(serviceSteps: Int, serviceTracking: Boolean) {
+    fun MapScreen(serviceSteps: Int, serviceTracking: Boolean, hasGpx: Boolean) {
+        if (!hasGpx) {
+            Column(
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxSize().background(Color.Black)
+            ) {
+                Text("Follow GPX", color = Color(0xFF7B9E87), fontSize = 30.sp)
+                Spacer(modifier = Modifier.height(24.dp))
+                Button(
+                    onClick = {
+                        pickGpxFile.launch(arrayOf("application/gpx+xml", "application/xml", "text/xml", "*/*"))
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4A7C59))
+                ) {
+                    Text("Import GPX", color = Color.White, fontSize = 18.sp)
+                }
+            }
+            return
+        }
+
         val photosNeedingLocation by photosNeedingManualLocation.collectAsState()
         val currentPhotoIndex by selectedPhotoIndex.collectAsState()
         val sliderPosition by selectedTrackpointIndex.collectAsState()
@@ -1083,49 +1085,52 @@ class FollowGpxActivity : ComponentActivity() {
                     shape = RoundedCornerShape(20.dp),
                     color = Color(0xCC1A1A1A)
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                "$serviceSteps",
-                                color = Color.White,
-                                fontSize = 36.sp,
-                                fontFamily = HandjetFontFamily
-                            )
-                            Text("steps", color = Color.LightGray, fontSize = 11.sp)
-                        }
-
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                "%.2f".format(distanceValue),
-                                color = Color.White,
-                                fontSize = 36.sp,
-                                fontFamily = HandjetFontFamily
-                            )
-                            Text(distanceUnitLabel, color = Color.LightGray, fontSize = 11.sp)
-                        }
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        IconButton(
-                            onClick = { if (serviceTracking) pauseTracking() else startTracking() }
+                        Text("Follow GPX", color = Color(0xFF7B9E87), fontSize = 13.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            Icon(
-                                imageVector = if (serviceTracking) Icons.Default.Refresh else Icons.Default.PlayArrow,
-                                contentDescription = if (serviceTracking) "Pause" else "Play",
-                                tint = if (serviceTracking) Color(0xFFFFA500) else Color(0xFF4A7C59),
-                                modifier = Modifier.size(36.dp)
-                            )
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    "$serviceSteps",
+                                    color = Color.White,
+                                    fontSize = 36.sp,
+                                    fontFamily = HandjetFontFamily
+                                )
+                                Text("steps", color = Color.LightGray, fontSize = 11.sp)
+                            }
+
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    "%.2f".format(distanceValue),
+                                    color = Color.White,
+                                    fontSize = 36.sp,
+                                    fontFamily = HandjetFontFamily
+                                )
+                                Text(distanceUnitLabel, color = Color.LightGray, fontSize = 11.sp)
+                            }
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            IconButton(
+                                onClick = { if (serviceTracking) pauseTracking() else startTracking() }
+                            ) {
+                                Icon(
+                                    imageVector = if (serviceTracking) Icons.Default.Refresh else Icons.Default.PlayArrow,
+                                    contentDescription = if (serviceTracking) "Pause" else "Play",
+                                    tint = if (serviceTracking) Color(0xFFFFA500) else Color(0xFF4A7C59),
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
                         }
                     }
                 }
-
-
-                }
-            
+            }
 
             if (photosNeedingLocation.isNotEmpty() && currentPhotoIndex < photosNeedingLocation.size) {
                 Column(
@@ -1793,6 +1798,30 @@ class FollowGpxActivity : ComponentActivity() {
             .show()
     }
 
+    private fun setPathWaviness() {
+        val input = EditText(this)
+        input.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        AlertDialog.Builder(this)
+            .setTitle("Path Waviness")
+            .setView(input)
+            .setMessage("Current: ${pathWavinessMeters.value}m\n\nHow far the path wanders sideways off the road/route centerline, in meters\n\nHigher = wigglier path, lower = straighter path")
+            .setPositiveButton("OK") { _, _ ->
+                val value = input.text.toString()
+                if (value.isNotEmpty()) {
+                    val number = value.toDoubleOrNull()
+                    if (number == null || number < 0) {
+                        Toast.makeText(this, "Enter a valid distance", Toast.LENGTH_SHORT).show()
+                        return@setPositiveButton
+                    }
+                    pathWavinessMeters.value = number
+                    scope.launch { followGpxRepository.savePathWaviness(number) }
+                    Toast.makeText(this, "Path waviness: ${number}m", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("CANCEL", null)
+            .show()
+    }
+
     private fun setUnits() {
         val options = arrayOf("Metric (km)", "Imperial (mi)")
         var selected = if (useImperial.value) 1 else 0
@@ -1893,7 +1922,7 @@ class FollowGpxActivity : ComponentActivity() {
                 reachedEnd.value = false
                 userChoseToContinue.value = false
                 gpxImported.value = true
-                selectedTab.value = 1
+                selectedTab.value = 0
 
                 isReversing.value = false
                 reverseStartSteps.value = 0
@@ -2259,7 +2288,7 @@ class FollowGpxActivity : ComponentActivity() {
                     selectedPhotoIndex.value = 0
                     selectedTrackpointIndex.value = fullTrail.size / 2
                     withContext(Dispatchers.Main) {
-                        selectedTab.value = 1
+                        selectedTab.value = 0
                         Toast.makeText(this@FollowGpxActivity, "${photosOutOfRange.size} photos need manual location", Toast.LENGTH_LONG).show()
                     }
                 }

@@ -28,6 +28,7 @@ class FollowGpxStepRepository(private val context: Context) {
         private val CONTINUE_AS_ROAD_KEY = booleanPreferencesKey("continue_as_road")
         private val SEARCH_RADIUS_KEY = intPreferencesKey("search_radius_meters")
         private val LOOP_THRESHOLD_KEY = intPreferencesKey("loop_closing_threshold_meters")
+        private val PATH_WAVINESS_KEY = doublePreferencesKey("path_waviness_meters")
         private val PREV_TRAILS_KEY = stringPreferencesKey("prev_trails")
         private const val MAX_PREV_TRAILS = 5
         private const val TRAIL_SEP = "¶"
@@ -130,6 +131,7 @@ class FollowGpxStepRepository(private val context: Context) {
         val stepLength: Double,
         val searchRadiusMeters: Int,
         val loopClosingThresholdMeters: Int,
+        val pathWavinessMeters: Double,
         val timestamps: List<ZonedDateTime>,
         val startStepCount: Int
     )
@@ -165,6 +167,10 @@ class FollowGpxStepRepository(private val context: Context) {
         context.followGpxDataStore.edit { prefs -> prefs[LOOP_THRESHOLD_KEY] = meters }
     }
 
+    suspend fun savePathWaviness(meters: Double) {
+        context.followGpxDataStore.edit { prefs -> prefs[PATH_WAVINESS_KEY] = meters }
+    }
+
     suspend fun saveStartStepCount(count: Int) {
         context.followGpxDataStore.edit { prefs ->
             prefs[START_STEP_COUNT_KEY] = count
@@ -188,6 +194,7 @@ class FollowGpxStepRepository(private val context: Context) {
         val stepLength = prefs[STEP_LENGTH_KEY] ?: 0.75
         val searchRadiusMeters = prefs[SEARCH_RADIUS_KEY] ?: 1000
         val loopClosingThresholdMeters = prefs[LOOP_THRESHOLD_KEY] ?: 10
+        val pathWavinessMeters = prefs[PATH_WAVINESS_KEY] ?: 2.0
         val startStepCount = prefs[START_STEP_COUNT_KEY] ?: 0
 
         val timestampsStr = prefs[TIMESTAMPS_KEY] ?: ""
@@ -203,7 +210,7 @@ class FollowGpxStepRepository(private val context: Context) {
             }
         }
 
-        return StepData(steps, initialSensorCount, stepLength, searchRadiusMeters, loopClosingThresholdMeters, timestamps, startStepCount)
+        return StepData(steps, initialSensorCount, stepLength, searchRadiusMeters, loopClosingThresholdMeters, pathWavinessMeters, timestamps, startStepCount)
     }
 
     // clears the current walk/session state, but preserves user settings (step length, search
