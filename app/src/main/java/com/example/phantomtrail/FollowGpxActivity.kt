@@ -67,7 +67,6 @@ import com.example.phantomtrail.utils.PhotoGpsProcessor
 import com.example.phantomtrail.utils.RandomRoadGenerator
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
-import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -132,6 +131,7 @@ class FollowGpxActivity : ComponentActivity() {
         private val searchRadiusMeters = MutableStateFlow(1000)
         const val MAX_SEARCH_RADIUS_METERS = 10000
         private val pathWavinessMeters = MutableStateFlow(2.0)
+        const val MAX_PATH_WAVINESS_METERS = 20.0
         private val useImperial = MutableStateFlow(false)
         private val walkedTrailColor = MutableStateFlow(AppPreferences.DEFAULT_WALKED_TRAIL_COLOR)
         val selectedTab = MutableStateFlow(0) // 0=Map, 1=Actions, 2=Settings
@@ -195,11 +195,6 @@ class FollowGpxActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        Configuration.getInstance().apply {
-            userAgentValue = packageName
-            load(this@FollowGpxActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
-        }
 
         followGpxRepository = FollowGpxStepRepository(this)
         photoProcessor = PhotoGpsProcessor(this, contentResolver)
@@ -1804,7 +1799,7 @@ class FollowGpxActivity : ComponentActivity() {
         AlertDialog.Builder(this)
             .setTitle("Path Waviness")
             .setView(input)
-            .setMessage("Current: ${pathWavinessMeters.value}m\n\nHow far the path wanders sideways off the road/route centerline, in meters\n\nHigher = wigglier path, lower = straighter path")
+            .setMessage("Current: ${pathWavinessMeters.value}m\n\nHow far the path wanders sideways off the road/route centerline, in meters\n\nHigher = wigglier path, lower = straighter path\n\nNote: Maximum is ${MAX_PATH_WAVINESS_METERS.toInt()}m")
             .setPositiveButton("OK") { _, _ ->
                 val value = input.text.toString()
                 if (value.isNotEmpty()) {
@@ -1813,9 +1808,20 @@ class FollowGpxActivity : ComponentActivity() {
                         Toast.makeText(this, "Enter a valid distance", Toast.LENGTH_SHORT).show()
                         return@setPositiveButton
                     }
-                    pathWavinessMeters.value = number
-                    scope.launch { followGpxRepository.savePathWaviness(number) }
-                    Toast.makeText(this, "Path waviness: ${number}m", Toast.LENGTH_SHORT).show()
+                    if (number > MAX_PATH_WAVINESS_METERS) {
+                        AlertDialog.Builder(this)
+                            .setTitle("Distance too large")
+                            .setMessage("Exceeds maximum waviness of ${MAX_PATH_WAVINESS_METERS.toInt()}m. Setting to ${MAX_PATH_WAVINESS_METERS.toInt()}m.")
+                            .setPositiveButton("OK") { _, _ ->
+                                pathWavinessMeters.value = MAX_PATH_WAVINESS_METERS
+                                scope.launch { followGpxRepository.savePathWaviness(MAX_PATH_WAVINESS_METERS) }
+                            }
+                            .show()
+                    } else {
+                        pathWavinessMeters.value = number
+                        scope.launch { followGpxRepository.savePathWaviness(number) }
+                        Toast.makeText(this, "Path waviness: ${number}m", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
             .setNegativeButton("CANCEL", null)

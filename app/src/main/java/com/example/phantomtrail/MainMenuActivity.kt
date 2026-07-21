@@ -101,7 +101,7 @@ class MainMenuActivity : ComponentActivity() {
                     }
 
                     Spacer(modifier = Modifier.weight(1f))
-                    Text("V1.7.2", color = Color.DarkGray, fontSize = 12.sp)
+                    Text("V1.7.3", color = Color.DarkGray, fontSize = 12.sp)
                     Spacer(modifier = Modifier.height(24.dp))
                 }
             }

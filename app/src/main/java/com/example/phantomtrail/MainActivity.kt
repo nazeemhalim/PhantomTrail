@@ -69,7 +69,6 @@ import com.example.phantomtrail.utils.PhotoGpsProcessor
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
-import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -149,11 +148,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         Log.d(TAG, "=== MainActivity onCreate ===")
-
-        Configuration.getInstance().apply {
-            userAgentValue = packageName
-            load(this@MainActivity, getSharedPreferences("osmdroid", MODE_PRIVATE))
-        }
 
         repository = StepRepository(this)
         photoProcessor = PhotoGpsProcessor(this, contentResolver)
