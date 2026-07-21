@@ -67,7 +67,7 @@ import com.example.phantomtrail.utils.PhotoGpsProcessor
 import com.example.phantomtrail.utils.RandomRoadGenerator
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import com.example.phantomtrail.utils.CartoVoyagerTileSource
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
@@ -1258,7 +1258,7 @@ class FollowGpxActivity : ComponentActivity() {
 
         val mapView = remember {
             MapView(context).apply {
-                setTileSource(TileSourceFactory.MAPNIK)
+                setTileSource(CartoVoyagerTileSource)
                 setMultiTouchControls(true)
                 controller.setZoom(16.0)
             }
@@ -1712,7 +1712,10 @@ class FollowGpxActivity : ComponentActivity() {
     }
 
     private fun setStepLength() {
-        val input = EditText(this)
+        val input = EditText(this).apply {
+            setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.LTGRAY)
+        }
         input.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
 
         AlertDialog.Builder(this)
@@ -1733,7 +1736,10 @@ class FollowGpxActivity : ComponentActivity() {
     }
 
     private fun setSearchRadius() {
-        val input = EditText(this)
+        val input = EditText(this).apply {
+            setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.LTGRAY)
+        }
         input.inputType = InputType.TYPE_CLASS_NUMBER
         AlertDialog.Builder(this)
             .setTitle("Search Radius")
@@ -1768,7 +1774,10 @@ class FollowGpxActivity : ComponentActivity() {
     }
 
     private fun setLoopClosingThreshold() {
-        val input = EditText(this)
+        val input = EditText(this).apply {
+            setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.LTGRAY)
+        }
         input.inputType = InputType.TYPE_CLASS_NUMBER
         val currentMeters = (loopClosingThresholdKm.value * 1000).toInt()
         AlertDialog.Builder(this)
@@ -1794,7 +1803,10 @@ class FollowGpxActivity : ComponentActivity() {
     }
 
     private fun setPathWaviness() {
-        val input = EditText(this)
+        val input = EditText(this).apply {
+            setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.LTGRAY)
+        }
         input.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
         AlertDialog.Builder(this)
             .setTitle("Path Waviness")

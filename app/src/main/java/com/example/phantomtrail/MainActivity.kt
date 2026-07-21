@@ -69,7 +69,7 @@ import com.example.phantomtrail.utils.PhotoGpsProcessor
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import com.example.phantomtrail.utils.CartoVoyagerTileSource
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
@@ -767,7 +767,7 @@ class MainActivity : ComponentActivity() {
 
         val mapView = remember {
             MapView(context).apply {
-                setTileSource(TileSourceFactory.MAPNIK)
+                setTileSource(CartoVoyagerTileSource)
                 setMultiTouchControls(true)
                 controller.setZoom(18.0)
                 controller.setCenter(GeoPoint(startLat, startLon))
@@ -925,7 +925,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun setStepLength() {
-        val input = EditText(this)
+        val input = EditText(this).apply {
+            setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.LTGRAY)
+        }
         input.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
 
         AlertDialog.Builder(this)
@@ -946,7 +949,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun setPathWaviness() {
-        val input = EditText(this)
+        val input = EditText(this).apply {
+            setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(android.graphics.Color.LTGRAY)
+        }
         input.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
         AlertDialog.Builder(this)
             .setTitle("Path Waviness")
